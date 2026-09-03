@@ -6,6 +6,10 @@
 
 无需服务器、无需联网、无需构建——打开即用。
 
+<div align="center">
+   <img src="doc/main-window.png" alt="完全离线的单文件 HTML 小说阅读器"/>
+</div>
+
 ---
 
 ## ✨ 功能一览
