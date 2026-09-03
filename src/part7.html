@@ -694,7 +694,8 @@ class App {
   _bindUI() {
     $('#toggle-sidebar').onclick = () => $('#sidebar').classList.toggle('open');
     $('#btn-import').onclick = () => $('#file-input').click();
-    $('#btn-paste').onclick = () => $('#dlg-paste').style.display = 'flex';
+    // 粘贴导入弹窗：统一绑定打开 + 关闭（取消 / 右上角 ✕）
+    bindModal($('#dlg-paste'), $('#btn-paste'));
     $('#paste-ok').onclick = async () => {
       const title = $('#paste-title').value.trim();
       const text = $('#paste-text').value;
