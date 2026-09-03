@@ -1,0 +1,840 @@
+
+/* ---------- 12. 备份管理 BackupManager（迁移：导出 / 导入） ---------- */
+const APP_VERSION = '1.0.0';
+
+class BackupManager {
+  constructor(data) { this.data = data; }
+
+  /** 导出：打包全部书籍内容 + 进度 + 设置为一个 JSON 文件 */
+  async export() {
+    const prog = progressUI();
+    prog.show(I18N.t('progCollect')); prog.set(0.15); prog.setSub(I18N.t('progReadDb'));
+    const data = await this.data.exportAll();
+    prog.set(0.7); prog.setSub(I18N.t('progPackJson'));
+    const chapters = data.chapters.reduce((n, c) => n + (c.items ? c.items.length : 0), 0);
+    const payload = {
+      app: 'Offline Novel Reader',
+      appVersion: APP_VERSION,
+      schema: 1,
+      exportedAt: nowStamp(),
+      counts: {
+        books: data.books.length,
+        chapters,
+        positions: data.positions.length,
+        settings: data.settings.length,
+        totalChars: data.books.reduce((n, b) => n + (b.totalChars || 0), 0),
+      },
+      data,
+    };
+    await new Promise(r => setTimeout(r, 30)); // 让进度渲染一下
+    prog.set(0.9);
+    const json = JSON.stringify(payload);
+    const blob = new Blob([json], { type: 'application/json' });
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const name = `novel-reader-backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+    downloadBlob(name, blob);
+    prog.done();
+    return { name, counts: payload.counts };
+  }
+
+  /** 解析备份文件 */
+  parse(text) {
+    let payload;
+    try { payload = JSON.parse(text); } catch (e) { throw new Error(I18N.t('errBackupJson')); }
+    if (!payload || payload.schema !== 1 || !payload.data || !Array.isArray(payload.data.books)) {
+      throw new Error(I18N.t('errBackupSchema'));
+    }
+    return payload;
+  }
+
+  /** 导入: mode = 'merge'(合并去重) | 'overwrite'(覆盖) */
+  async import(payload, mode, onTick) {
+    const prog = progressUI();
+    prog.show(mode === 'overwrite' ? I18N.t('progOverwrite') : I18N.t('progMerge'));
+    prog.set(0.1);
+    prog.setSub(I18N.t('progBooks', { n: payload.data.books.length }));
+    const report = await this.data.importAll(payload.data, mode, onTick);
+    prog.set(1); prog.done();
+    return report;
+  }
+
+  static summarize(data) {
+    return {
+      books: (data.books || []).length,
+      chapters: (data.chapters || []).reduce((n, c) => n + (c.items ? c.items.length : 0), 0),
+      positions: (data.positions || []).length,
+    };
+  }
+}
+
+/* ---------- 13. 应用门面 App（Facade：组装各模块 + 绑定 UI） ---------- */
+class App {
+  constructor() {
+    this.bus = new EventBus();
+    this.settings = { ...App.DEFAULT_SETTINGS };
+    this._activeBookId = null;
+    this._searchTerm = '';
+  }
+
+  static get DEFAULT_SETTINGS() {
+    return {
+      lang: '',           // '' = 跟随浏览器语言自动检测
+      theme: 'light',
+      fontSize: 18,
+      lineHeight: 1.9,
+      fontFamily: 'serif',
+      pageWidth: 84,
+      hitZone: true,
+      indent: true,
+      selAction: 'popup',
+      ttsRate: 1,
+      ttsVoice: '',
+    };
+  }
+
+  async init() {
+    // ---- 存储层（IndexedDB 优先，localStorage 降级）----
+    this.adapter = await App._pickAdapter();
+    this.data = new DataManager(this.adapter, this.bus);
+    this.data._worker = TextWorker.create();
+
+    // ---- 设置 ----
+    for (const key of Object.keys(App.DEFAULT_SETTINGS)) {
+      this.settings[key] = await this.data.getSetting(key, App.DEFAULT_SETTINGS[key]);
+    }
+    // ---- 界面语言（设置优先，未设置时跟随浏览器语言）----
+    const detect = () => (navigator.language || navigator.languages?.[0] || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+    I18N.lang = (this.settings.lang === 'zh' || this.settings.lang === 'en') ? this.settings.lang : detect();
+    if (this.settings.lang !== I18N.lang) {
+      this.settings.lang = I18N.lang;
+      this.data.setSetting('lang', I18N.lang).catch(() => {});
+    }
+    I18N.applyStatic();
+    this._applySettings();
+
+    // ---- 词典（离线策略注册表 + 自定义词条）----
+    const custom = await this.data.getSetting('customDict', []);
+    this.dict = new DictionaryService(this.bus);
+    await this.dict.init(custom);
+    this.backup = new BackupManager(this.data);
+
+    // ---- 阅读器 ----
+    this.reader = new Reader(this.bus);
+    this.reader.data = this.data;
+    this.reader.settings = this.settings;
+    this.reader.onSelectionAction = (text, type, auto) => this._handleSelection(text, type, auto);
+    this.reader.applySettings(this.settings);
+
+    // ---- 事件与 UI ----
+    this._wireBus();
+    this._buildDictPanel();
+    this._bindUI();
+    await this.refreshBooks();
+
+    // ---- 状态栏 ----
+    $('#st-db').textContent = this.adapter.mode === 'indexeddb' ? I18N.t('stDbIdb') : I18N.t('stDbLs');
+    $('#st-worker').textContent = I18N.t('stWorker', { m: I18N.t(this.data._worker.available ? 'workerReady' : 'workerMain') });
+    $('#st-book').textContent = I18N.t('noBook');
+    this._fillRateSelect('#tts-rate');
+    this._fillSettingSelects();
+    this._voices = [];
+    this.reader.tts.onVoices(voices => { this._voices = voices; this._fillVoiceSelect(voices); });
+
+    // ---- 恢复上次阅读的书籍 ----
+    const lastId = await this.data.getSetting('lastBookId', null);
+    if (lastId) {
+      const book = await this.data.getBook(lastId);
+      if (book) await this.openBook(book.id);
+    }
+
+    document.body.dataset.ready = '1';
+    console.info(`[NovelReader] v${APP_VERSION} 就绪 · 存储: ${this.adapter.mode}`);
+  }
+
+  static async _pickAdapter() {
+    try {
+      const a = new IndexedDBAdapter();
+      await a.init();
+      return a;
+    } catch (e) {
+      console.warn('IndexedDB 不可用，降级为 localStorage：', e);
+    }
+    try {
+      return new LocalStorageAdapter();
+    } catch (e) {
+      toast(I18N.t('noStorage'), true, 6000);
+      throw e;
+    }
+  }
+
+  /* ---------- 设置 ---------- */
+  async setSetting(key, value) {
+    this.settings[key] = value;
+    await this.data.setSetting(key, value);
+    // 仅影响阅读排版的设置需要重排页面；其余即时生效即可
+    const layoutKeys = new Set(['theme', 'fontSize', 'lineHeight', 'fontFamily', 'pageWidth', 'hitZone', 'indent']);
+    if (layoutKeys.has(key)) {
+      this._applySettings();
+    } else if (key === 'ttsRate') {
+      this.reader.tts.setRate(value);
+      this._syncSettingsDialog();
+    } else if (key === 'ttsVoice') {
+      this.reader.tts.setVoice(value);
+    } else {
+      this._syncSettingsDialog();
+    }
+  }
+  _applySettings() {
+    document.body.dataset.theme = this.settings.theme;
+    if (this.reader) this.reader.applySettings(this.settings);
+    this._syncSettingsDialog();
+  }
+  _syncSettingsDialog() {
+    $('#set-theme').value = this.settings.theme;
+    $('#set-fontsize').value = String(this.settings.fontSize);
+    $('#set-lineheight').value = String(this.settings.lineHeight);
+    $('#set-fontfamily').value = this.settings.fontFamily;
+    $('#set-pagewidth').value = String(this.settings.pageWidth);
+    $('#set-hitzone').checked = !!this.settings.hitZone;
+    $('#set-indent').checked = !!this.settings.indent;
+    $('#set-selaction').value = this.settings.selAction;
+  }
+
+  /* ---------- 书库 ---------- */
+  async refreshBooks() {
+    const books = await this.data.listBooks();
+    this._books = books;
+    this._renderBookList();
+  }
+
+  _renderBookList() {
+    const ul = $('#book-list');
+    const term = this._searchTerm.trim().toLowerCase();
+    ul.innerHTML = '';
+    for (const b of this._books) {
+      if (term && !(b.title || '').toLowerCase().includes(term) && !(b.author || '').toLowerCase().includes(term)) continue;
+      const li = document.createElement('li');
+      li.className = 'book-item' + (b.id === this._activeBookId ? ' active' : '');
+      li.dataset.id = b.id;
+      const pct = Math.round((b.percent || 0) * 100);
+      const first = (b.title || I18N.t('bookCover')).trim().charAt(0) || I18N.t('bookCover');
+      const meta = [
+        b.chapterCount ? I18N.t('metaChap', { n: b.chapterCount }) : '',
+        I18N.t('metaChars', { n: fmtNum(b.totalChars) }),
+        pct > 0 ? I18N.t('metaRead', { p: pct }) : I18N.t('metaUnread'),
+        b.lastReadAt ? App._timeAgo(b.lastReadAt) : '',
+      ].filter(Boolean).join(' · ');
+      li.innerHTML = `
+        <div class="cover">${escapeHtml(first)}</div>
+        <div class="info">
+          <div class="b-title">${escapeHtml(b.title || I18N.t('untitled'))}</div>
+          <div class="b-meta">${escapeHtml(meta)}</div>
+          <div class="b-progress"><i style="width:${Math.min(100, Math.max(0, pct))}%"></i></div>
+        </div>
+        <button class="b-del" title="${I18N.t('delBookTitle')}">✕</button>
+      `;
+      li.onclick = (e) => {
+        if (e.target.closest('.b-del')) return;
+        this.openBook(b.id);
+      };
+      li.querySelector('.b-del').onclick = (e) => {
+        e.stopPropagation();
+        this._deleteBook(b);
+      };
+      ul.appendChild(li);
+    }
+    if (!ul.children.length) {
+      ul.innerHTML = '<li style="padding:18px 12px;color:var(--muted);font-size:12.5px;line-height:1.8">'
+        + (this._searchTerm ? I18N.t('listEmptySearch') : I18N.t('listEmptyHtml'))
+        + '</li>';
+    }
+  }
+  static _timeAgo(ts) {
+    const diff = Date.now() - ts;
+    if (diff < 60000) return I18N.t('timeAgoJust');
+    if (diff < 3600000) return I18N.t('timeAgoMin', { n: Math.floor(diff / 60000) });
+    if (diff < 86400000) return I18N.t('timeAgoHour', { n: Math.floor(diff / 3600000) });
+    return I18N.t('timeAgoDay', { n: Math.floor(diff / 86400000) });
+  }
+
+  async openBook(id) {
+    const book = await this.data.getBook(id);
+    if (!book) { toast(I18N.t('bookMissing'), true); return; }
+    this._activeBookId = id;
+    this.data.setSetting('lastBookId', id).catch(() => {});
+    this._renderBookList();
+    await this.reader.openBook(book);
+    $('#st-book').textContent = book.title;
+    this.bus.emit('app:book-open', book);
+  }
+
+  async _deleteBook(book) {
+    const ok = await confirmDialog({
+      title: I18N.t('deleteTitle'),
+      message: I18N.t('deleteMsgHtml', { title: escapeHtml(book.title) }),
+      okText: I18N.t('deleteOk'), danger: true,
+    });
+    if (!ok) return;
+    await this.data.deleteBook(book.id);
+    if (this._activeBookId === book.id) {
+      this._activeBookId = null;
+      this.reader.closeBook();
+      $('#st-book').textContent = I18N.t('noBook');
+    }
+    await this.refreshBooks();
+    toast(I18N.t('deletedMsg', { title: book.title }));
+  }
+
+  /* ---------- 导入小说 ---------- */
+  async importFiles(files) {
+    let lastBook = null;
+    const list = [...files].filter(f => /\.(txt|md|text)$/i.test(f.name) || f.type.startsWith('text/'));
+    if (!list.length) { toast(I18N.t('noTxtFiles'), true); return; }
+    const prog = progressUI();
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      prog.show(I18N.t('importing', { a: i + 1, b: list.length }));
+      prog.setSub(f.name);
+      prog.set((i) / Math.max(1, list.length));
+      try {
+        const buf = await f.arrayBuffer();
+        const { text, encoding } = decodeTextBytes(buf);
+        const title = f.name.replace(/\.(txt|md|text)$/i, '').trim() || I18N.t('untitled');
+        const book = await this._importText({ title, sourceName: f.name, text, encoding });
+        if (book) lastBook = book;
+      } catch (e) {
+        console.error(e);
+        toast(I18N.t('importFail', { name: f.name, msg: e.message }), true);
+      }
+    }
+    prog.set(1); prog.done();
+    await this.refreshBooks();
+    if (lastBook) await this.openBook(lastBook.id);
+  }
+
+  async _importText({ title, sourceName, text, encoding }) {
+    const { duplicate, book } = await this.data.importText({ title, sourceName, text });
+    if (duplicate) {
+      const ok = await confirmDialog({
+        title: I18N.t('dupTitle'),
+        message: I18N.t('dupMsgHtml', { title: escapeHtml(book.title) }),
+        okText: I18N.t('dupOk'), danger: true,
+      });
+      if (!ok) return null;
+      await this.data.replaceBook({ id: book.id, title, sourceName, text });
+      toast(I18N.t('reimported', { title }));
+      return { id: book.id, title };
+    }
+    toast(I18N.t('imported', { title }));
+    return { id: book.id, title };
+  }
+
+  /* ---------- 划词操作 ---------- */
+  _handleSelection(text, type, auto) {
+    switch (type) {
+      case 'translate':
+        this._openDictPanel(text, 'translate', auto);
+        break;
+      case 'explain':
+        this._openDictPanel(text, 'explain', auto);
+        break;
+      case 'speak':
+        this._speakSelection(text);
+        break;
+      case 'copy':
+        navigator.clipboard && navigator.clipboard.writeText(text)
+          .then(() => toast(I18N.t('copied')))
+          .catch(() => { window.prompt(I18N.t('copyPrompt'), text); });
+        break;
+    }
+  }
+  _speakSelection(text) {
+    if (!this.reader.tts.supported) { toast(I18N.t('noTts'), true); return; }
+    this.reader.stopReading();
+    this.reader.tts.speakOnce(text, this.settings.ttsRate, this.settings.ttsVoice, () => {});
+    toast(I18N.t('speakingSel'));
+  }
+
+  /* ---------- 词典面板 ---------- */
+  _renderDictTabs() {
+    const tabs = $('#dict-tabs');
+    tabs.innerHTML = '';
+    for (const d of DictionaryService.DICTS) {
+      const b = document.createElement('button');
+      b.className = 'tab'; b.dataset.dict = d.id;
+      b.textContent = I18N.t('d_' + d.id);
+      b.title = I18N.t('d_hint_' + d.id);
+      b.onclick = () => { this._dictActive = d.id; this._dictMode = ''; this._renderDict(); };
+      tabs.appendChild(b);
+    }
+    if (!this._dictActive) this._dictActive = 'en2cn';
+    $$('#dict-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.dict === this._dictActive));
+  }
+  _buildDictPanel() {
+    this._dictActive = this._dictActive || 'en2cn';
+    this._dictQuery = '';
+    this._renderDictTabs();
+    $('#dict-close').onclick = () => $('#dict-panel').classList.remove('open');
+    $('#dict-go').onclick = () => this._runDictQuery($('#dict-input').value);
+    $('#dict-input').addEventListener('keydown', e => { if (e.key === 'Enter') this._runDictQuery(e.target.value); });
+  }
+
+  /** 界面语言切换（中 / EN） */
+  async _switchLang() {
+    const next = I18N.lang === 'zh' ? 'en' : 'zh';
+    I18N.lang = next;
+    this.settings.lang = next;
+    try { await this.data.setSetting('lang', next); } catch (e) { /* 设置项保底失败不阻塞切换 */ }
+    I18N.applyStatic();
+    this._renderBookList();            // 书库空状态 / 元信息文案
+    this._renderDictTabs();            // 词典标签
+    this._renderDict();                // 当前查询结果文案
+    this._fillVoiceSelect(this._voices || []); // 默认发音人
+    $('#st-book').textContent = this.reader.book ? this.reader.book.title : I18N.t('noBook');
+    $('#st-tts').textContent = this.reader.reading ? I18N.t('stReading') : '';
+    if ($('#dlg-chapters').style.display !== 'none') this._openToc();
+  }
+
+  _openDictPanel(text, mode, auto) {
+    this._dictMode = mode;
+    this._dictQuery = text;
+    $('#dict-input').value = text;
+    $('#dict-panel').classList.add('open');
+    this._renderDict();
+  }
+
+  _runDictQuery(text) {
+    text = (text || '').trim();
+    if (!text) { toast(I18N.t('dictNeedQuery')); return; }
+    this._dictMode = '';   // 手动查询：回到「查词/翻译」视图
+    this._dictQuery = text;
+    this._renderDict();
+  }
+
+  /** 按当前标签渲染词典结果 */
+  _renderDict() {
+    const q = (this._dictQuery || '').trim();
+    const out = $('#dict-result');
+    if (!q) {
+      out.innerHTML = `<div class="dict-empty">${I18N.t('dictEmptyHtml')}</div>`;
+      return;
+    }
+    $$('#dict-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.dict === this._dictActive));
+    const lang = DictionaryService.detectLang(q);
+    const trans = this.dict.translate(q);
+    const explain = this.dict.explain(q);
+
+    let html = '';
+    // 来源文本
+    html += `<div class="dict-src-text"><q>${escapeHtml(q.length > 120 ? q.slice(0, 120) + '…' : q)}</q></div>`;
+
+    // 翻译模式：按语言方向自动选择词典（中→英 / 英→中）；手动查词按当前标签
+    const dictId = this._dictMode === 'translate' ? (trans.lang === 'cn' ? 'cn2en' : 'en2cn') : this._dictActive;
+    if (this._dictMode === 'explain') {
+      // 解释模式：展示中文解释（成语 / 词语 / 逐字 / 未收录），与「翻译」明确区分
+      if (lang !== 'cn') {
+        html += `<div class="dict-empty">${I18N.t('explainCnOnly')}</div>`;
+      } else {
+        html += `<div class="dict-title">${I18N.t('explainHeader')}</div>`;
+        if (explain && explain.idiom) {
+          html += `<div class="dict-title">${I18N.t('explainIdiom')}</div>`;
+          html += `<div class="dict-entry"><span class="w">${escapeHtml(explain.idiom.word)}</span><span class="d">${escapeHtml(explain.idiom.gloss)}</span><span class="dict-tag">${I18N.t('tagIdiom')}</span></div>`;
+        }
+        if (explain && explain.words.length) {
+          html += `<div class="dict-title">${I18N.t('explainWords')}</div>`;
+          html += explain.words.slice(0, 40).map(w =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(w.word)}</span><span class="d">${escapeHtml(w.gloss)}</span><span class="dict-tag">cn2en</span></div>`).join('');
+        }
+        // 未成词的单字：逐字解释
+        const leftover = [...new Set((explain.chars || []).filter(c => c.trim()))];
+        if (leftover.length) {
+          const withG = leftover.filter(c => this.dict.maps.chars.has(c));
+          const noG = leftover.filter(c => !this.dict.maps.chars.has(c));
+          if (withG.length) {
+            html += `<div class="dict-title">${I18N.t('explainChars')}</div>`;
+            html += withG.slice(0, 30).map(c =>
+              `<div class="dict-entry"><span class="w">${escapeHtml(c)}</span><span class="d">${escapeHtml(this.dict.maps.chars.get(c))}</span><span class="dict-tag">${I18N.t('tagChar')}</span></div>`).join('');
+          }
+          if (noG.length) html += `<div class="dict-title">${I18N.t('explainUnknown')}</div><p class="muted-text">${escapeHtml(noG.slice(0, 30).join(' '))}</p>`;
+        }
+      }
+    } else {
+      // 翻译 / 查词模式：翻译给出整句词义 + 词典对照表；手动查词只给对应标签的词条
+      if (this._dictMode === 'translate') {
+        html += `<div class="dict-title">${I18N.t('dictLineGloss')}</div>`;
+        html += `<div class="dict-translate">${this._renderSegments(trans)}</div>`;
+      }
+      if (dictId === 'en2cn') {
+        if (trans.lang !== 'en') {
+          html += `<div class="dict-empty">${I18N.t('dictEnEmpty')}</div>`;
+        } else {
+          html += `<div class="dict-title">${I18N.t('dictEnTitle', { hit: trans.segments.filter(s => s.gloss).length, total: trans.segments.length })}</div>`;
+          html += trans.segments.filter(s => s.gloss).map(s =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(s.txt)}</span><span class="d">${escapeHtml(s.gloss)}</span><span class="dict-tag">en2cn</span></div>`).join('');
+          if (trans.unknown.length) html += `<div class="dict-title">${I18N.t('dictUnknown')}</div><p class="muted-text">${escapeHtml(trans.unknown.slice(0, 20).join(' / '))}</p>`;
+        }
+      } else if (dictId === 'cn2en') {
+        if (trans.lang !== 'cn') {
+          html += `<div class="dict-empty">${I18N.t('dictCnEmpty')}</div>`;
+        } else {
+          html += `<div class="dict-title">${I18N.t('dictCnTitle', { hit: trans.segments.filter(s => s.gloss).length, total: trans.segments.length })}</div>`;
+          html += trans.segments.filter(s => s.gloss && s.dict === 'cn2en').map(s =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(s.txt)}</span><span class="d">${escapeHtml(s.gloss)}</span><span class="dict-tag">cn2en</span></div>`).join('');
+        }
+      } else if (dictId === 'idioms') {
+        const items = [];
+        if (explain && explain.idiom) items.push(explain.idiom);
+        if (q.length > 0) {
+          // 在全文中扫描所有成语
+          for (let i = 0; i < q.length; i++) {
+            for (let L = 4; L >= 3; L--) {
+              const w = q.slice(i, i + L);
+              if (this.dict.maps.idioms.has(w)) items.push({ word: w, gloss: this.dict.maps.idioms.get(w) });
+              if (items.length > 40) break;
+            }
+          }
+        }
+        // 去重
+        const seen = new Set(); const uniq = items.filter(it => { if (seen.has(it.word)) return false; seen.add(it.word); return true; });
+        if (!uniq.length) html += `<div class="dict-empty">${I18N.t('dictNoIdiom')}</div>`;
+        else {
+          html += `<div class="dict-title">${I18N.t('dictIdiomTitle', { n: uniq.length })}</div>`;
+          html += uniq.map(it =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(it.word)}</span><span class="d">${escapeHtml(it.gloss)}</span><span class="dict-tag">${I18N.t('tagIdiom')}</span></div>`).join('');
+        }
+      } else if (dictId === 'chars') {
+        if (lang !== 'cn') {
+          html += `<div class="dict-empty">${I18N.t('charsCnOnly')}</div>`;
+        } else {
+          const uniq = [...new Set(q.replace(/\s+/g, '').split(''))];
+          const withGloss = uniq.filter(c => this.dict.maps.chars.has(c));
+          const without = uniq.filter(c => !this.dict.maps.chars.has(c));
+          html += `<div class="dict-title">${I18N.t('charsTitle', { hit: withGloss.length, total: uniq.length })}</div>`;
+          html += withGloss.map(c =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(c)}</span><span class="d">${escapeHtml(this.dict.maps.chars.get(c))}</span><span class="dict-tag">${I18N.t('tagChar')}</span></div>`).join('');
+          if (without.length) html += `<div class="dict-title">${I18N.t('charsMissing')}</div><p class="muted-text">${escapeHtml(without.slice(0, 30).join(' '))}</p>`;
+        }
+      }
+    }
+    html += this._renderCustomDict();
+    out.innerHTML = html;
+  }
+
+  _renderSegments(trans) {
+    return trans.segments.map(s => {
+      if (s.gloss) {
+        return `<span class="dict-seg hit" title="${escapeHtml(s.txt + ' → ' + s.gloss)}">${escapeHtml(s.txt)}</span>`;
+      }
+      return `<span class="dict-seg miss">${escapeHtml(s.txt)}</span>`;
+    }).join('');
+  }
+
+  /** 自定义词条（写入 / 删除数据的功能演示） */
+  _renderCustomDict() {
+    const entries = this.dict.custom;
+    let html = `<div class="dict-title">${I18N.t('customTitleHtml')}</div>`;
+    html += `<div class="custom-entry">
+      <input id="cd-word" placeholder="${I18N.t('cdWordPh')}" autocomplete="off">
+      <input id="cd-gloss" placeholder="${I18N.t('cdGlossPh')}" autocomplete="off">
+      <button id="cd-add" class="btn ghost" style="padding:6px 10px">${I18N.t('cdAdd')}</button>
+    </div>`;
+    if (entries.length) {
+      html += entries.slice().reverse().map(e =>
+        `<div class="custom-entry"><span class="w" style="min-width:80px">${escapeHtml(e.word)}</span><span class="d" style="flex:1">${escapeHtml(e.gloss)}</span><button data-del="${escapeHtml(e.word)}" style="color:var(--danger);font-size:13px;padding:4px 8px">${I18N.t('cdDel')}</button></div>`).join('');
+    } else {
+      html += `<p class="muted-text" style="font-size:12px">${I18N.t('cdEmpty')}</p>`;
+    }
+    // 事件在渲染后绑定
+    setTimeout(() => this._bindCustomDictUI(), 0);
+    return html;
+  }
+  _bindCustomDictUI() {
+    const add = $('#cd-add');
+    if (!add) return;
+    add.onclick = async () => {
+      const w = $('#cd-word').value.trim();
+      const g = $('#cd-gloss').value.trim();
+      if (!w || !g) { toast(I18N.t('cdFill')); return; }
+      await this.dict.addCustomEntry(w, g);
+      await this.data.setSetting('customDict', this.dict.custom);
+      $('#cd-word').value = ''; $('#cd-gloss').value = '';
+      this._renderDict();
+      toast(I18N.t('cdAdded'));
+    };
+    $$('[data-del]').forEach(b => {
+      b.onclick = async () => {
+        await this.dict.removeCustomEntry(b.dataset.del);
+        await this.data.setSetting('customDict', this.dict.custom);
+        this._renderDict();
+      };
+    });
+  }
+
+  /* ---------- 备份 ---------- */
+  async exportBackup() {
+    try {
+      const { name, counts } = await this.backup.export();
+      toast(I18N.t('exportedMsg', { name, books: counts.books, chapters: counts.chapters, chars: fmtNum(counts.totalChars) }));
+    } catch (e) {
+      console.error(e);
+      toast(I18N.t('exportFail', { msg: e.message }), true);
+    }
+  }
+
+  async importBackupFile(file) {
+    try {
+      const text = await file.text();
+      const payload = this.backup.parse(text);
+      const sum = BackupManager.summarize(payload.data);
+      const counts = payload.counts;
+
+      const mode = await App._threeWay({
+        title: I18N.t('importTitle'),
+        message:
+          I18N.t('bkFileHtml', { name: escapeHtml(file.name) }) +
+          I18N.t('bkTimeHtml', { t: escapeHtml(payload.exportedAt || '—') }) +
+          I18N.t('bkContainsHtml', { books: sum.books, chapters: sum.chapters, positions: sum.positions }) +
+          (counts ? I18N.t('bkCharsHtml', { chars: fmtNum(counts.totalChars) }) : '') +
+          I18N.t('bkMergeHtml') +
+          I18N.t('bkOverwriteHtml'),
+        okText: I18N.t('mergeOk'),
+        extraText: I18N.t('overwriteExtra'),
+      });
+      if (!mode) return;
+      if (mode === 'extra') {
+        const c = await confirmDialog({
+          title: I18N.t('confirmOverwriteTitle'),
+          message: I18N.t('confirmOverwriteMsgHtml'),
+          okText: I18N.t('confirmOverwriteOk'), danger: true,
+        });
+        if (!c) return;
+      }
+      const report = await this.backup.import(payload, mode === 'extra' ? 'overwrite' : 'merge');
+      // 重新加载
+      this._books = null;
+      this.reader.closeBook();
+      this._activeBookId = null;
+      await this.refreshBooks();
+      const lastId = await this.data.getSetting('lastBookId', null);
+      if (lastId) {
+        const book = await this.data.getBook(lastId);
+        if (book) await this.openBook(book.id);
+      }
+      toast(I18N.t('importDone', { books: report.books, chapters: report.chapters, positions: report.positions, skipped: report.skipped }));
+    } catch (e) {
+      console.error(e);
+      toast(I18N.t('importFail', { msg: e.message }), true);
+    }
+  }
+
+  /** 三按钮选择框：resolve('ok' | 'extra' | false) */
+  static _threeWay({ title, message, okText, extraText }) {
+    return new Promise(resolve => {
+      const dlg = $('#dlg-confirm');
+      $('#cf-title').textContent = title;
+      $('#cf-message').innerHTML = message;
+      $('#cf-ok').textContent = okText;
+      $('#cf-ok').className = 'btn primary';
+      let extraBtn = $('#cf-extra');
+      if (!extraBtn) {
+        extraBtn = document.createElement('button');
+        extraBtn.id = 'cf-extra';
+        $('#cf-cancel').after(extraBtn);
+      }
+      extraBtn.textContent = extraText;
+      extraBtn.className = 'btn danger';
+      extraBtn.style.display = '';
+      const close = v => {
+        dlg.style.display = 'none';
+        $('#cf-ok').onclick = $('#cf-cancel').onclick = extraBtn.onclick = null;
+        resolve(v);
+      };
+      $('#cf-ok').onclick = () => close('ok');
+      $('#cf-cancel').onclick = () => close(false);
+      extraBtn.onclick = () => close('extra');
+      dlg.style.display = 'flex';
+    });
+  }
+
+  /* ---------- 目录 ---------- */
+  _openToc() {
+    if (!this.reader.book) return;
+    const ul = $('#toc-list');
+    ul.innerHTML = '';
+    const titles = this.reader.book.chapterTitles || this.reader.chapters.map(c => c.title);
+    $('#toc-title').textContent = I18N.t('tocTitle') + ' · ' + this.reader.book.title + ' (' + titles.length + ')';
+    titles.forEach((t, i) => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="ci">${i + 1}</span>${escapeHtml(t)}`;
+      if (i === this.reader.chapterIndex) li.classList.add('current');
+      li.onclick = () => {
+        $('#dlg-chapters').style.display = 'none';
+        this.reader.gotoChapter(i, 0);
+      };
+      ul.appendChild(li);
+    });
+    $('#dlg-chapters').style.display = 'flex';
+  }
+
+  /* ---------- 事件总线 ---------- */
+  _wireBus() {
+    this.bus.on('books:changed', () => this.refreshBooks());
+    this.bus.on('reader:page', (info) => {
+      $('#st-chapter').textContent = (info.title || '').slice(0, 30);
+    });
+    this.bus.on('reader:toc-open', () => this._openToc());
+    this.bus.on('tts:state', (s) => {
+      $('#st-tts').textContent = s.reading ? I18N.t('stReading') : '';
+    });
+    this.bus.on('settings:changed', () => { /* 已经即时应用 */ });
+  }
+
+  /* ---------- UI 事件绑定 ---------- */
+  _bindUI() {
+    $('#toggle-sidebar').onclick = () => $('#sidebar').classList.toggle('open');
+    $('#btn-import').onclick = () => $('#file-input').click();
+    $('#btn-paste').onclick = () => $('#dlg-paste').style.display = 'flex';
+    $('#paste-ok').onclick = async () => {
+      const title = $('#paste-title').value.trim();
+      const text = $('#paste-text').value;
+      if (!title) { toast(I18N.t('needTitle')); return; }
+      if (!text.trim()) { toast(I18N.t('needText')); return; }
+      $('#dlg-paste').style.display = 'none';
+      const book = await this._importText({ title, sourceName: I18N.t('pasteSource'), text });
+      $('#paste-title').value = ''; $('#paste-text').value = '';
+      await this.refreshBooks();
+      if (book) await this.openBook(book.id);
+    };
+    $('#btn-export').onclick = () => this.exportBackup();
+    $('#btn-import-backup').onclick = () => $('#backup-input').click();
+    $('#backup-input').onchange = (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) this.importBackupFile(f);
+      e.target.value = '';
+    };
+    $('#file-input').onchange = (e) => {
+      if (e.target.files && e.target.files.length) this.importFiles(e.target.files);
+      e.target.value = '';
+    };
+    $('#book-search').oninput = debounce((e) => {
+      this._searchTerm = e.target.value;
+      this._renderBookList();
+    }, 180);
+
+    // 语言切换
+    $('#btn-lang').onclick = () => this._switchLang();
+
+    // 设置对话框
+    bindModal($('#dlg-settings'), $('#btn-settings'));
+    const bindSelect = (id, key) => {
+      $(id).onchange = (e) => { this.setSetting(key, e.target.value); };
+    };
+    bindSelect('#set-theme', 'theme');
+    bindSelect('#set-fontsize', 'fontSize');
+    bindSelect('#set-lineheight', 'lineHeight');
+    bindSelect('#set-fontfamily', 'fontFamily');
+    bindSelect('#set-pagewidth', 'pageWidth');
+    bindSelect('#set-selaction', 'selAction');
+    $('#set-hitzone').onchange = e => this.setSetting('hitZone', e.target.checked);
+    $('#set-indent').onchange = e => this.setSetting('indent', e.target.checked);
+
+    // 工具栏语速 / 发音人
+    $('#tts-rate').onchange = e => this.setSetting('ttsRate', parseFloat(e.target.value));
+    $('#tts-voice').onchange = e => {
+      this.setSetting('ttsVoice', e.target.value);
+      this.reader.tts.setVoice(e.target.value);
+    };
+
+    // 帮助
+    bindModal($('#dlg-help'), $('#btn-help'));
+    // 目录弹窗
+    $('#dlg-chapters').querySelectorAll('[data-close]').forEach(b => {
+      b.onclick = () => $('#dlg-chapters').style.display = 'none';
+    });
+    $('#dlg-chapters').addEventListener('mousedown', e => {
+      if (e.target === $('#dlg-chapters')) $('#dlg-chapters').style.display = 'none';
+    });
+
+    // 隐藏状态时保存进度（移动端切后台）
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.reader._persistPosition();
+    });
+    window.addEventListener('beforeunload', () => {
+      try { this.reader._persistPosition(); } catch (e) { /* noop */ }
+    });
+  }
+
+  _fillRateSelect(idSel) {
+    const sel = $(idSel);
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (const r of ['0.5', '0.75', '1', '1.25', '1.5', '1.75', '2']) {
+      const o = document.createElement('option');
+      o.value = r; o.textContent = r + 'x';
+      sel.appendChild(o);
+    }
+    sel.value = String(this.settings.ttsRate);
+  }
+  /** 填充设置里的数值型下拉：字号 / 行距 / 页宽 */
+  _fillSettingSelects() {
+    this._fillNumSelect('#set-fontsize', [14, 16, 18, 20, 22, 24, 26, 28, 30], String(this.settings.fontSize));
+    this._fillNumSelect('#set-lineheight', [1.4, 1.6, 1.8, 1.9, 2.0, 2.2, 2.4], String(this.settings.lineHeight));
+    this._fillNumSelect('#set-pagewidth', [60, 70, 80, 84, 90, 100], String(this.settings.pageWidth), '%');
+  }
+  _fillNumSelect(idSel, values, current, suffix = '') {
+    const sel = $(idSel);
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (const v of values) {
+      const o = document.createElement('option');
+      o.value = String(v); o.textContent = String(v) + suffix;
+      sel.appendChild(o);
+    }
+    // 若当前值不在预设内（如从备份迁移而来），补一项避免下拉空白
+    if (!values.map(String).includes(String(current))) {
+      const o = document.createElement('option');
+      o.value = String(current); o.textContent = String(current) + suffix;
+      sel.appendChild(o);
+    }
+    sel.value = String(current);
+  }
+  _fillVoiceSelect(voices) {
+    const sel = $('#tts-voice');
+    sel.innerHTML = '<option value="">' + I18N.t('defaultVoice') + '</option>';
+    const zh = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
+    const rest = voices.filter(v => !(v.lang && v.lang.toLowerCase().startsWith('zh')));
+    const add = v => {
+      const o = document.createElement('option');
+      o.value = v.voiceURI;
+      o.textContent = `${v.name} (${v.lang})`;
+      sel.appendChild(o);
+    };
+    zh.forEach(add); rest.forEach(add);
+    sel.value = this.settings.ttsVoice || '';
+  }
+}
+
+/* ---------- 14. 启动 ---------- */
+(function boot() {
+  window.addEventListener('error', (e) => {
+    console.error('[NovelReader] 全局错误:', e.message, e.filename, e.lineno);
+    const db = $('#st-db');
+    if (db) db.textContent = I18N.t('runtimeError');
+    toast(I18N.t('errToast', { msg: e.message }), true, 4000);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    console.error('[NovelReader] 未处理拒绝:', e.reason);
+  });
+
+  const app = new App();
+  app.init()
+    .then(() => {
+      window.__app = app; // 便于控制台调试
+    })
+    .catch(err => {
+      console.error(err);
+      toast(I18N.t('initFail', { msg: err.message }), true, 8000);
+      document.body.dataset.ready = 'error';
+    });
+})();

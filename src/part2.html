@@ -1,0 +1,932 @@
+<body data-theme="light">
+<div id="app">
+
+  <!-- ===== 顶栏 ===== -->
+  <header id="topbar">
+    <button class="btn ghost icon" id="toggle-sidebar" data-i18n-title="tocTitle">☰</button>
+    <div class="brand"><span class="logo">📖</span><span data-i18n="appName">离线小说阅读器</span></div>
+    <div class="tb-spacer"></div>
+    <button class="btn primary" id="btn-import" data-i18n-title="impTitle" data-i18n="btnImport">⬆ 导入小说</button>
+    <button class="btn ghost icon" id="btn-paste" data-i18n-title="pasteTitle">📋</button>
+    <button class="btn ghost bt-hide-sm" id="btn-export" data-i18n-title="exportTitle" data-i18n="btnExport">⇩ 导出备份</button>
+    <button class="btn ghost bt-hide-sm" id="btn-import-backup" data-i18n-title="impBackTitle" data-i18n="btnImpBack">⇧ 导入备份</button>
+    <button class="btn ghost icon" id="btn-lang" data-i18n-title="langSwitch">🌐 EN</button>
+    <button class="btn ghost icon" id="btn-settings" data-i18n-title="settingsTitle">⚙</button>
+    <button class="btn ghost icon" id="btn-help" data-i18n-title="helpTitle">?</button>
+  </header>
+
+  <!-- ===== 侧栏 · 书库 ===== -->
+  <aside id="sidebar">
+    <div class="side-search"><input id="book-search" type="search" data-i18n-ph="searchPh" placeholder="搜索书名 / 作者…" autocomplete="off"></div>
+    <ul id="book-list"></ul>
+    <div class="side-foot">
+      <span><span class="dot"></span><span id="st-db" data-i18n="dbInit">数据库…</span></span>
+      <span id="st-worker" data-i18n="workerInit">线程:—</span>
+    </div>
+  </aside>
+
+  <!-- ===== 阅读区 ===== -->
+  <main id="main">
+    <div id="reader-empty">
+      <div class="big">📖</div>
+      <div class="hint">
+        <p data-i18n-html="welcomeHtml"><b>欢迎使用离线小说阅读器</b></p>
+        <p data-i18n-html="emptyHintHtml">点击「<b>导入小说</b>」选择 <b>.txt / .md</b> 文件开始阅读（自动识别 UTF-8 / GBK 编码）。</p>
+        <p data-i18n-html="emptyMigrateHtml">换设备时：旧设备点「<b>导出备份</b>」，新设备打开本页后点「<b>导入备份</b>」即可恢复全部书籍与阅读位置。</p>
+        <p class="muted-text" style="font-size:12px" data-i18n-html="emptyOfflineHtml">完全离线运行：书籍、进度、词典全部保存在浏览器本地（IndexedDB）。</p>
+      </div>
+    </div>
+
+    <div id="reader">
+      <div class="rtoolbar">
+        <button class="btn ghost icon rt-toc" id="btn-toc" data-i18n-title="tocTitle">☷</button>
+        <button class="btn ghost icon rt-chapnav" id="btn-chap-prev" data-i18n-title="chapPrevTitle">«</button>
+        <span class="rt-title" id="rt-title">—</span>
+        <button class="btn ghost icon rt-chapnav" id="btn-chap-next" data-i18n-title="chapNextTitle">»</button>
+        <span class="rt-gap"></span>
+        <button class="btn icon" id="tts-play" data-i18n-title="ttsPlayTitle">▶</button>
+        <button class="btn icon" id="tts-stop" data-i18n-title="ttsStopTitle" disabled>■</button>
+        <select class="mini" id="tts-rate" data-i18n-title="ttsRateTitle"></select>
+        <select class="mini bt-hide-sm" id="tts-voice" data-i18n-title="ttsVoiceTitle" style="max-width:132px"></select>
+        <span class="rt-gap"></span>
+        <button class="btn icon" id="btn-page-prev" data-i18n-title="pagePrevTitle">‹</button>
+        <span class="rt-page-label" id="rt-page">1 / 1</span>
+        <button class="btn icon" id="btn-page-next" data-i18n-title="pageNextTitle">›</button>
+        <span class="rt-percent" id="rt-percent" data-i18n-title="percentTitle">0%</span>
+      </div>
+      <div id="page-frame">
+        <div id="page-content" tabindex="0"></div>
+        <div class="hot-zone" id="hz-left" data-i18n-title="hzPageTitle"></div>
+        <div class="hot-zone" id="hz-right" data-i18n-title="hzPageTitle"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ===== 状态栏 ===== -->
+  <footer id="statusbar">
+    <span id="st-book">未打开书籍</span>
+    <span id="st-chapter"></span>
+    <span id="st-tts"></span>
+    <span style="flex:1"></span>
+    <span id="st-hint" data-i18n="stHint">划选正文 → 翻译 / 解释 / 朗读 · 键盘 ← → 翻页</span>
+  </footer>
+</div>
+
+<!-- ===== 词典 / 翻译面板 ===== -->
+<aside id="dict-panel">
+  <div class="dict-head">
+    <span class="dh-title" data-i18n="dictTitle">📚 词典 · 翻译 / 解释</span>
+    <button class="btn ghost icon" id="dict-close">✕</button>
+  </div>
+  <div class="dict-query">
+    <input id="dict-input" data-i18n-ph="dictInputPh" placeholder="输入或划选文字，回车查询…" autocomplete="off">
+    <button class="btn primary" id="dict-go" data-i18n="dictGo">查询</button>
+  </div>
+  <div id="dict-tabs"></div>
+  <div id="dict-result"></div>
+</aside>
+
+<!-- ===== 划词弹出工具栏 ===== -->
+<div id="sel-popup"></div>
+
+<!-- ===== 目录 ===== -->
+<div class="modal-backdrop" id="dlg-chapters" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h3 id="toc-title" data-i18n="tocTitle">目录</h3><button class="btn ghost icon" data-close>✕</button></div>
+    <div class="modal-body"><ul id="toc-list"></ul></div>
+  </div>
+</div>
+
+<!-- ===== 粘贴导入 ===== -->
+<div class="modal-backdrop" id="dlg-paste" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h3 data-i18n="pasteTitleH">粘贴导入小说</h3><button class="btn ghost icon" data-close>✕</button></div>
+    <div class="modal-body">
+      <div class="form-row"><label data-i18n="pasteName">书名</label><input id="paste-title" type="text" data-i18n-ph="pasteNamePh" placeholder="必填" autocomplete="off"></div>
+      <div class="form-row"><label data-i18n="pasteBody">正文（可粘贴大段文本，自动切分章节）</label><textarea id="paste-text" data-i18n-ph="pasteTextPh" placeholder="把小说内容粘贴到这里…"></textarea></div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-close data-i18n="cancel">取消</button><button class="btn primary" id="paste-ok" data-i18n="pasteOk">导入</button></div>
+  </div>
+</div>
+
+<!-- ===== 设置 ===== -->
+<div class="modal-backdrop" id="dlg-settings" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h3 data-i18n="setTitle">⚙ 阅读设置</h3><button class="btn ghost icon" data-close>✕</button></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-row"><label data-i18n="setTheme">主题</label>
+          <select id="set-theme"><option value="light" data-i18n="theme_light">浅色</option><option value="sepia" data-i18n="theme_sepia">羊皮纸</option><option value="dark" data-i18n="theme_dark">深色</option><option value="green" data-i18n="theme_green">护眼绿</option></select></div>
+        <div class="form-row"><label data-i18n="setFontSize">字号</label><select id="set-fontsize"></select></div>
+        <div class="form-row"><label data-i18n="setLineHeight">行距</label><select id="set-lineheight"></select></div>
+        <div class="form-row"><label data-i18n="setFont">字体</label>
+          <select id="set-fontfamily"><option value="serif" data-i18n="font_serif">宋体系 (衬线)</option><option value="kai" data-i18n="font_kai">楷体系</option><option value="sans" data-i18n="font_sans">黑体系 (无衬线)</option></select></div>
+        <div class="form-row"><label data-i18n="setPageWidth">页宽</label><select id="set-pagewidth"></select></div>
+      </div>
+      <div class="form-check"><input type="checkbox" id="set-hitzone"><label data-i18n="setHitZone">点击页面左右两侧边翻页</label></div>
+      <div class="form-check"><input type="checkbox" id="set-indent"><label data-i18n="setIndent">段落首行缩进两字符</label></div>
+      <div class="form-row"><label data-i18n="setSelAction">划词操作</label>
+        <select id="set-selaction"><option value="popup" data-i18n="setSelPopup">弹出工具栏（翻译 / 解释 / 朗读）</option><option value="auto" data-i18n="setSelAuto">划词后自动打开词典翻译</option></select></div>
+      <p class="muted-text" style="font-size:12px;line-height:1.8" data-i18n="setNote">设置与阅读进度会自动保存到浏览器数据库；「导出备份」会包含全部书籍内容、进度与自定义词条。</p>
+    </div>
+    <div class="modal-foot"><button class="btn primary" data-close data-i18n="doneBtn">完成</button></div>
+  </div>
+</div>
+
+<!-- ===== 帮助 ===== -->
+<div class="modal-backdrop" id="dlg-help" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h3>❓ <span data-i18n="helpTitle">帮助</span></h3><button class="btn ghost icon" data-close>✕</button></div>
+    <div class="modal-body help-block" data-i18n-html="helpHtml"></div>
+    <div class="modal-foot"><button class="btn primary" data-close data-i18n="doneBtn">知道了</button></div>
+  </div>
+</div>
+
+<!-- ===== 通用确认框 ===== -->
+<div class="modal-backdrop" id="dlg-confirm" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><h3 id="cf-title" data-i18n="cfTitle">确认</h3></div>
+    <div class="modal-body" id="cf-message"></div>
+    <div class="modal-foot"><button class="btn ghost" id="cf-cancel" data-i18n="cancel">取消</button><button class="btn primary" id="cf-ok" data-i18n="ok">确定</button></div>
+  </div>
+</div>
+
+<!-- ===== 导入/导出进度覆盖层 ===== -->
+<div id="progress-overlay">
+  <div class="prog-card">
+    <div class="prog-title" id="prog-title" data-i18n="progDefault">处理中…</div>
+    <div class="prog-sub" id="prog-sub"></div>
+    <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+    <div class="prog-pct" id="prog-pct">0%</div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<input type="file" id="file-input" accept=".txt,.md,.text,text/plain" multiple hidden>
+<input type="file" id="backup-input" accept=".json,.novelreader,.bak,application/json" hidden>
+
+<script type="module">
+'use strict';
+/* ============================================================================
+   离线小说阅读器 — 应用脚本（单文件模块化）
+   架构分层（自底向上）:
+     utils           通用工具 / EventBus(观察者)
+     storage         StorageAdapter 接口 + IndexedDB / localStorage 两套实现（存储层）
+     worker          Web Worker 线程池（多线程章节切分）
+     data            DataManager（数据仓库: 书籍/章节/进度 CRUD）
+     dict            词典服务（策略模式: 多词典可切换）
+     tts             语音朗读服务（浏览器原生 SpeechSynthesis）
+     reader          LineBreaker + Pager 分页排版引擎 + Reader 阅读控制器
+     backup          备份导出 / 导入（迁移）
+     app             App 门面（Facade）：组装以上模块 + 绑定 UI 事件
+   ========================================================================== */
+
+/* ---------- 0. 工具函数 utils ---------- */
+const $  = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function debounce(fn, ms) {
+  let t = 0;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/** 数字简写（跟随界面语言：中文 万/亿，英文 K/M） */
+function fmtNum(n) { return I18N.fmt(n); }
+
+function nowStamp() { return new Date().toISOString(); }
+
+/** 稳定性好的字符串 FNV-1a 哈希（用于生成书籍 ID，可复现，用于去重检测） */
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+/* ---------- Toast 通知 ---------- */
+function toast(msg, isErr = false, ms = 2600) {
+  const box = document.createElement('div');
+  box.className = 'toast' + (isErr ? ' err' : '');
+  box.textContent = msg;
+  $('#toasts').appendChild(box);
+  setTimeout(() => box.remove(), ms);
+}
+
+/** 通用确认框 → Promise<boolean> */
+function confirmDialog({ title = I18N.t('cfTitle'), message = '', okText = I18N.t('ok'), danger = false }) {
+  return new Promise(resolve => {
+    $('#cf-title').textContent = title;
+    $('#cf-message').innerHTML = message;
+    const ok = $('#cf-ok');
+    ok.textContent = okText;
+    ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+    const close = val => {
+      $('#dlg-confirm').style.display = 'none';
+      ok.onclick = null; $('#cf-cancel').onclick = null;
+      $('#dlg-confirm').querySelectorAll('[data-close]').forEach(b => b.onclick = null);
+      resolve(val);
+    };
+    ok.onclick = () => close(true);
+    $('#cf-cancel').onclick = () => close(false);
+    $('#dlg-confirm').querySelectorAll('[data-close]').forEach(b => b.onclick = () => close(false));
+    $('#dlg-confirm').style.display = 'flex';
+  });
+}
+
+/** 进度覆盖层：show 返回 {set(v), setSub(s), done()} */
+function progressUI() {
+  const wrap = $('#progress-overlay');
+  const fill = $('#prog-fill'), pct = $('#prog-pct'), sub = $('#prog-sub'), title = $('#prog-title');
+  return {
+    show(t) {
+      title.textContent = t; fill.style.width = '0%'; pct.textContent = '0%';
+      sub.textContent = ''; wrap.classList.add('show');
+    },
+    set(v) {
+      const p = Math.max(0, Math.min(100, Math.round(v * 100)));
+      fill.style.width = p + '%'; pct.textContent = p + '%';
+    },
+    setSub(s) { sub.textContent = s; },
+    done() { wrap.classList.remove('show'); },
+  };
+}
+
+/** 弹窗开关通用绑定 */
+function bindModal(modal, openBtn) {
+  if (openBtn) openBtn.onclick = () => { modal.style.display = 'flex'; };
+  modal.querySelectorAll('[data-close]').forEach(b => {
+    b.onclick = () => { modal.style.display = 'none'; };
+  });
+  modal.addEventListener('mousedown', e => {
+    if (e.target === modal) modal.style.display = 'none';
+  });
+}
+
+/* ---------- 0.5 国际化 I18n（中 / EN 界面切换，由 App 门面驱动） ----------
+ *  用法: I18N.t(key, {param}) 取当前语言文案，{param} 做占位替换；
+ *  I18N.applyStatic() 把 [data-i18n] / [data-i18n-ph] / [data-i18n-title] / [data-i18n-html]
+ *  的静态文案一次性应用到 DOM（切换语言后重跑即可）。 */
+const I18N_LANGS = {
+  zh: {
+    // 通用 / 标题
+    appTitle: '离线小说阅读器',
+    appName: '离线小说阅读器',
+    untitled: '未命名小说',
+    bookCover: '书',
+    cancel: '取消',
+    ok: '确定',
+    // 顶栏
+    btnImport: '⬆ 导入小说',
+    btnExport: '⇩ 导出备份',
+    btnImpBack: '⇧ 导入备份',
+    impTitle: '导入 .txt / .md 小说文件（可多选）',
+    pasteTitle: '粘贴文本导入',
+    exportTitle: '导出全部书籍与阅读进度为备份文件',
+    impBackTitle: '从备份文件恢复书籍与阅读进度',
+    settingsTitle: '阅读设置',
+    helpTitle: '帮助',
+    langSwitch: '切换界面语言（中 / EN）',
+    // 侧栏
+    searchPh: '搜索书名 / 作者…',
+    dbInit: '数据库…',
+    workerInit: '线程:—',
+    stDbIdb: 'IndexedDB 已连接',
+    stDbLs: '兼容存储(localStorage)',
+    workerReady: '后台就绪',
+    workerMain: '主线程',
+    stWorker: '线程: {m}',
+    // 空状态欢迎页
+    welcomeHtml: '<b>欢迎使用离线小说阅读器</b>',
+    emptyHintHtml: '点击「<b>导入小说</b>」选择 <b>.txt / .md</b> 文件开始阅读（自动识别 UTF-8 / GBK 编码）。',
+    emptyMigrateHtml: '换设备时：旧设备点「<b>导出备份</b>」，新设备打开本页后点「<b>导入备份</b>」即可恢复全部书籍与阅读位置。',
+    emptyOfflineHtml: '完全离线运行：书籍、进度、词典全部保存在浏览器本地（IndexedDB）。',
+    // 阅读工具栏
+    tocTitle: '目录',
+    chapPrevTitle: '上一章',
+    chapNextTitle: '下一章',
+    ttsPlayTitle: '从当前页开始朗读',
+    ttsStopTitle: '停止朗读',
+    ttsRateTitle: '朗读语速',
+    ttsVoiceTitle: '发音人',
+    pagePrevTitle: '上一页 (←)',
+    pageNextTitle: '下一页 (→)',
+    percentTitle: '全书进度',
+    hzPageTitle: '翻页（点击）',
+    noBook: '未打开书籍',
+    stHint: '划选正文 → 翻译 / 解释 / 朗读 · 键盘 ← → 翻页',
+    stReading: '🔊 朗读中…',
+    lastPage: '已是最后一页',
+    firstPage: '已是第一页',
+    lastChapter: '已是最后一章',
+    firstChapter: '已是第一章',
+    // 词典面板
+    dictTitle: '📚 词典 · 翻译 / 解释',
+    dictInputPh: '输入或划选文字，回车查询…',
+    dictGo: '查询',
+    dictNeedQuery: '请输入要查询的文字',
+    dictEmptyHtml: '在正文中划选文字，或在上方输入查询。<br>词典数据完全离线打包在本页面中。',
+    d_en2cn: '英译中', d_hint_en2cn: '英语单词/短语 → 中文释义',
+    d_cn2en: '中译英', d_hint_cn2en: '中文常用词 → 英语释义',
+    d_idioms: '成语', d_hint_idioms: '四字成语 / 惯用语释义',
+    d_chars: '汉字', d_hint_chars: '常见汉字 → 简明释义',
+    dictLineGloss: '整句逐词释义',
+    dictEnEmpty: '当前查询不是英文，请在「中译英」中查看。',
+    dictEnTitle: '英 → 中（词典命中 {hit}/{total} 词）',
+    dictUnknown: '未收录词',
+    dictCnEmpty: '当前查询不是中文，请在「英译中」中查看。',
+    dictCnTitle: '中 → 英（分词命中 {hit}/{total} 词）',
+    dictNoIdiom: '未找到成语/惯用语。',
+    dictIdiomTitle: '成语 / 惯用语（命中 {n} 条）',
+    tagIdiom: '成语',
+    charsCnOnly: '汉字详解仅支持中文。',
+    charsTitle: '逐字详解（{hit}/{total} 字已收录）',
+    tagChar: '汉字',
+    charsMissing: '未收录字',
+    explainIdiom: '成语',
+    explainWords: '词语解析',
+    explainChars: '逐字详解',
+    explainUnknown: '未收录汉字',
+    explainHeader: '📖 中文解释',
+    explainCnOnly: '解释功能仅针对中文文本（英文请用「翻译」）',
+    // 划词
+    selTranslate: '翻译',
+    selExplain: '解释',
+    selSpeak: '朗读',
+    selCopy: '复制',
+    copied: '已复制',
+    copyPrompt: '复制文本：',
+    noTts: '当前浏览器不支持语音合成(SpeechSynthesis)',
+    speakingSel: '正在朗读选中文字…',
+    bookFinished: '全书朗读完成',
+    // 粘贴导入
+    pasteTitleH: '粘贴导入小说',
+    pasteName: '书名',
+    pasteNamePh: '必填',
+    pasteBody: '正文（可粘贴大段文本，自动切分章节）',
+    pasteTextPh: '把小说内容粘贴到这里…',
+    pasteOk: '导入',
+    pasteSource: '粘贴导入',
+    needTitle: '请填写书名',
+    needText: '正文不能为空',
+    // 设置
+    setTitle: '⚙ 阅读设置',
+    setTheme: '主题', setFontSize: '字号', setLineHeight: '行距', setFont: '字体',
+    setPageWidth: '页宽',
+    setHitZone: '点击页面左右两侧边翻页',
+    setIndent: '段落首行缩进两字符',
+    setSelAction: '划词操作',
+    setSelPopup: '弹出工具栏（翻译 / 解释 / 朗读）',
+    setSelAuto: '划词后自动打开词典翻译',
+    setNote: '设置与阅读进度会自动保存到浏览器数据库；「导出备份」会包含全部书籍内容、进度与自定义词条。',
+    doneBtn: '完成',
+    theme_light: '浅色', theme_sepia: '羊皮纸', theme_dark: '深色', theme_green: '护眼绿',
+    font_serif: '宋体系 (衬线)', font_kai: '楷体系', font_sans: '黑体系 (无衬线)',
+    // 帮助
+    helpHtml: '<h4>快速上手</h4>' +
+      '<p>「导入小说」选择本地 .txt / .md 文件（支持多选、UTF-8 与 GBK 编码）；也可以「粘贴导入」。</p>' +
+      '<p>书籍与阅读位置保存在浏览器 IndexedDB 中，自动持久化，刷新不丢失。</p>' +
+      '<h4>换设备迁移</h4>' +
+      '<p>旧设备：<b>导出备份</b> → 得到 backup.json；新设备：打开本页面 → <b>导入备份</b> → 全部书籍 + 进度恢复。</p>' +
+      '<h4>划词 · 翻译 · 解释</h4>' +
+      '<p>在正文中划选文字，弹出工具栏：<b>翻译</b>（英↔中，右侧词典面板）、<b>解释</b>（中文词义 / 成语 / 逐字详解）、<b>朗读</b>（朗读选中片段）。全部离线完成。</p>' +
+      '<h4>朗读</h4>' +
+      '<p>使用浏览器原生语音合成；点击 ▶ 从当前页连续朗读，朗读到页尾自动翻页；可调节语速与发音人。</p>' +
+      '<h4>快捷键与手势</h4>' +
+      '<div class="key-row"><span><kbd>←</kbd> / <kbd>→</kbd> 或 <kbd>PageUp</kbd> / <kbd>PageDown</kbd></span><span>上一页 / 下一页</span></div>' +
+      '<div class="key-row"><span><kbd>Home</kbd> / <kbd>End</kbd></span><span>章首 / 章末</span></div>' +
+      '<div class="key-row"><span>移动端：左右滑动</span><span>翻页</span></div>' +
+      '<div class="key-row"><span>「☰」按钮</span><span>打开 / 收起书库</span></div>' +
+      '<div class="key-row"><span>长按 / 划选文字</span><span>翻译、解释、朗读</span></div>' +
+      '<h4>性能说明</h4>' +
+      '<p>章节切分在后台 Web Worker 线程异步执行（多线程），主界面不卡顿；分页排版采用测量分页，翻页流畅。</p>',
+    // 确认框 / 进度
+    cfTitle: '确认',
+    progDefault: '处理中…',
+    // 书库
+    metaChap: '{n} 章', metaChars: '{n} 字',
+    metaRead: '读到 {p}%', metaUnread: '未开始',
+    delBookTitle: '删除这本书',
+    listEmptySearch: '没有匹配的书籍',
+    listEmptyHtml: '书库为空<br>点击右上角「导入小说」开始',
+    deleteTitle: '删除书籍',
+    deleteMsgHtml: '确定删除《{title}》？<br><span class="muted-text">章节内容与阅读进度将一并删除，且无法撤销。</span>',
+    deleteOk: '删除',
+    deletedMsg: '已删除《{title}》',
+    bookMissing: '书籍不存在',
+    timeAgoJust: '刚刚',
+    timeAgoMin: '{n} 分钟前',
+    timeAgoHour: '{n} 小时前',
+    timeAgoDay: '{n} 天前',
+    // 导入
+    noTxtFiles: '请选择 .txt 或 .md 文本文件',
+    importing: '正在导入 ({a}/{b})',
+    importFail: '导入「{name}」失败: {msg}',
+    dupTitle: '检测到重复书籍',
+    dupMsgHtml: '《{title}》已存在于书库（内容相同）。<br>重新导入将<b>更新章节内容并重置阅读进度</b>。是否继续？',
+    dupOk: '重新导入',
+    reimported: '已重新导入《{title}》',
+    imported: '导入成功：《{title}》',
+    // 数据层
+    progSplit: '正在切分章节…',
+    progWorker: '后台线程处理中',
+    progOrganize: '整理章节…',
+    progWrite: '正在写入数据库…',
+    workerErr: 'Worker 异常: {msg}',
+    // 自定义词条
+    customTitleHtml: '自定义词条 <span class="muted-text" style="font-weight:400">（查询时优先命中）</span>',
+    cdWordPh: '词 / 短语', cdGlossPh: '释义',
+    cdAdd: '添加', cdDel: '删除',
+    cdEmpty: '还没有自定义词条，例如给网络小说里的专有名词加注释。',
+    cdFill: '请填写词条与释义',
+    cdAdded: '已添加词条',
+    // 备份
+    progCollect: '正在收集数据…',
+    progReadDb: '读取数据库',
+    progPackJson: '正在打包 JSON',
+    progOverwrite: '正在覆盖导入…',
+    progMerge: '正在合并导入…',
+    progBooks: '共 {n} 本书',
+    errBackupJson: '备份文件不是有效的 JSON',
+    errBackupSchema: '不是本阅读器生成的备份文件（schema 不匹配）',
+    exportedMsg: '已导出备份 {name}<br>{books} 本书 · {chapters} 章 · 共 {chars} 字',
+    exportFail: '导出备份失败: {msg}',
+    importTitle: '导入备份',
+    bkFileHtml: '备份文件：<b>{name}</b><br>',
+    bkTimeHtml: '导出时间：{t}<br>',
+    bkContainsHtml: '包含：<b>{books}</b> 本书、<b>{chapters}</b> 章、<b>{positions}</b> 条阅读进度<br><br>',
+    bkCharsHtml: '总字数约 <b>{chars}</b><br><br>',
+    bkMergeHtml: '<b>合并</b>：保留当前设备已有书籍，仅添加备份中不重复的内容与进度。<br>',
+    bkOverwriteHtml: '<b>覆盖</b>：清空当前设备全部数据，完整恢复备份内容（推荐在新设备上使用）。',
+    mergeOk: '合并导入',
+    overwriteExtra: '覆盖导入（清空现有数据）',
+    confirmOverwriteTitle: '确认覆盖',
+    confirmOverwriteMsgHtml: '覆盖将<b>清空当前设备上所有书籍、进度与设置</b>，并恢复为备份中的内容。确定继续吗？',
+    confirmOverwriteOk: '确认覆盖',
+    importDone: '导入完成：新增 {books} 本 · {chapters} 章 · {positions} 条进度 · 跳过 {skipped} 项',
+    importFail: '导入备份失败: {msg}',
+    // 存储 / 异常
+    noStorage: '浏览器无可用存储（IndexedDB/localStorage 均不可用），无法使用本应用',
+    storageFull: 'localStorage 容量不足：{msg}（建议改用支持 IndexedDB 的浏览器）',
+    runtimeError: '运行错误',
+    errToast: '发生错误: {msg}',
+    initFail: '初始化失败: {msg}',
+    defaultVoice: '默认发音人',
+  },
+  en: {
+    appTitle: 'Offline Novel Reader',
+    appName: 'Offline Novel Reader',
+    untitled: 'Untitled novel',
+    bookCover: 'Book',
+    cancel: 'Cancel',
+    ok: 'OK',
+    btnImport: '⬆ Import',
+    btnExport: '⇩ Export backup',
+    btnImpBack: '⇧ Import backup',
+    impTitle: 'Import .txt / .md novel files (multi-select)',
+    pasteTitle: 'Paste text to import',
+    exportTitle: 'Export all books & reading progress as a backup file',
+    impBackTitle: 'Restore books & progress from a backup file',
+    settingsTitle: 'Reader settings',
+    helpTitle: 'Help',
+    langSwitch: 'Switch UI language (English / 中文)',
+    searchPh: 'Search title / author…',
+    dbInit: 'Database…',
+    workerInit: 'Thread:—',
+    stDbIdb: 'IndexedDB connected',
+    stDbLs: 'Fallback storage (localStorage)',
+    workerReady: 'worker ready',
+    workerMain: 'main thread',
+    stWorker: 'Thread: {m}',
+    welcomeHtml: '<b>Welcome to the Offline Novel Reader</b>',
+    emptyHintHtml: 'Click <b>Import</b> and choose <b>.txt / .md</b> files to start reading (UTF-8 / GBK auto-detected).',
+    emptyMigrateHtml: 'Moving devices: click <b>Export backup</b> on the old device, then open this page on the new one and click <b>Import backup</b> to restore everything.',
+    emptyOfflineHtml: 'Fully offline: books, progress and dictionaries all live in your browser (IndexedDB).',
+    tocTitle: 'Table of contents',
+    chapPrevTitle: 'Previous chapter',
+    chapNextTitle: 'Next chapter',
+    ttsPlayTitle: 'Read aloud from this page',
+    ttsStopTitle: 'Stop reading',
+    ttsRateTitle: 'Reading speed',
+    ttsVoiceTitle: 'Voice',
+    pagePrevTitle: 'Previous page (←)',
+    pageNextTitle: 'Next page (→)',
+    percentTitle: 'Whole-book progress',
+    hzPageTitle: 'Turn page (tap)',
+    noBook: 'No book open',
+    stHint: 'Select text → translate / explain / speak · ← → keys turn pages',
+    stReading: '🔊 Reading…',
+    lastPage: 'This is the last page',
+    firstPage: 'This is the first page',
+    lastChapter: 'This is the last chapter',
+    firstChapter: 'This is the first chapter',
+    dictTitle: '📚 Dictionary · Translate / Explain',
+    dictInputPh: 'Type or select text, press Enter…',
+    dictGo: 'Look up',
+    dictNeedQuery: 'Please enter text to look up',
+    dictEmptyHtml: 'Select text in the reader, or type a query above.<br>All dictionary data is bundled offline in this page.',
+    d_en2cn: 'EN→CN', d_hint_en2cn: 'English words / phrases → Chinese',
+    d_cn2en: 'CN→EN', d_hint_cn2en: 'Chinese words → English',
+    d_idioms: 'Idioms', d_hint_idioms: '4-character idioms & set phrases',
+    d_chars: 'Hanzi', d_hint_chars: 'Common Chinese characters, plain meanings',
+    dictLineGloss: 'Word-by-word gloss',
+    dictEnEmpty: 'This query is not English — see the CN→EN tab.',
+    dictEnTitle: 'EN → CN ({hit}/{total} words found)',
+    dictUnknown: 'Unknown words',
+    dictCnEmpty: 'This query is not Chinese — see the EN→CN tab.',
+    dictCnTitle: 'CN → EN ({hit}/{total} tokens found)',
+    dictNoIdiom: 'No idioms found.',
+    dictIdiomTitle: 'Idioms / set phrases ({n} found)',
+    tagIdiom: 'idiom',
+    charsCnOnly: 'Chinese-only: character lookup works for Chinese text.',
+    charsTitle: 'Per-character detail ({hit}/{total} chars covered)',
+    tagChar: 'char',
+    charsMissing: 'Chars not covered',
+    explainIdiom: 'Idiom',
+    explainWords: 'Word breakdown',
+    explainChars: 'Per-character',
+    explainUnknown: 'Chars not covered',
+    explainHeader: '📖 Chinese explanation',
+    explainCnOnly: 'Explain works for Chinese text (use Translate for English)',
+    selTranslate: 'Translate',
+    selExplain: 'Explain',
+    selSpeak: 'Speak',
+    selCopy: 'Copy',
+    copied: 'Copied',
+    copyPrompt: 'Copy text: ',
+    noTts: 'Speech synthesis is not supported in this browser',
+    speakingSel: 'Reading selected text…',
+    bookFinished: 'Finished reading the book',
+    pasteTitleH: 'Paste-import a novel',
+    pasteName: 'Title',
+    pasteNamePh: 'required',
+    pasteBody: 'Body (paste freely; chapters are split automatically)',
+    pasteTextPh: 'Paste the novel text here…',
+    pasteOk: 'Import',
+    pasteSource: 'Pasted text',
+    needTitle: 'Please enter a title',
+    needText: 'The text must not be empty',
+    setTitle: '⚙ Reader settings',
+    setTheme: 'Theme', setFontSize: 'Font size', setLineHeight: 'Line height', setFont: 'Font',
+    setPageWidth: 'Page width',
+    setHitZone: 'Tap left/right edges of the page to turn pages',
+    setIndent: 'Indent the first line of each paragraph',
+    setSelAction: 'Selection action',
+    setSelPopup: 'Show toolbar (translate / explain / speak)',
+    setSelAuto: 'Auto-open dictionary on selection',
+    setNote: 'Settings & progress are saved to the browser database automatically; "Export backup" includes all books, progress and custom entries.',
+    doneBtn: 'Done',
+    theme_light: 'Light', theme_sepia: 'Sepia', theme_dark: 'Dark', theme_green: 'Green',
+    font_serif: 'Serif (song)', font_kai: 'Kai', font_sans: 'Sans (hei)',
+    helpHtml: '<h4>Quick start</h4>' +
+      '<p>Click <b>Import</b> and pick local .txt / .md files (multi-select, UTF-8 & GBK supported); you can also <b>paste text</b>.</p>' +
+      '<p>Books and reading positions are stored in the browser IndexedDB automatically and survive refreshes.</p>' +
+      '<h4>Moving devices</h4>' +
+      '<p>Old device: <b>Export backup</b> → get backup.json; new device: open this page → <b>Import backup</b> → all books + progress restored.</p>' +
+      '<h4>Select · translate · explain</h4>' +
+      '<p>Select any text in the reader and a toolbar offers <b>Translate</b> (EN↔CN, dictionary panel on the right), <b>Explain</b> (word meanings / idioms / per-character), and <b>Speak</b>. All offline.</p>' +
+      '<h4>Text-to-speech</h4>' +
+      '<p>Uses the browser native speech synthesis; click ▶ to read continuously from the current page with automatic page turns; adjust speed and voice.</p>' +
+      '<h4>Shortcuts & gestures</h4>' +
+      '<div class="key-row"><span><kbd>←</kbd> / <kbd>→</kbd> or <kbd>PageUp</kbd> / <kbd>PageDown</kbd></span><span>Previous / next page</span></div>' +
+      '<div class="key-row"><span><kbd>Home</kbd> / <kbd>End</kbd></span><span>Chapter start / end</span></div>' +
+      '<div class="key-row"><span>Mobile: swipe left / right</span><span>Turn pages</span></div>' +
+      '<div class="key-row"><span>«☰» button</span><span>Open / close the library</span></div>' +
+      '<div class="key-row"><span>Select text</span><span>Translate, explain, speak</span></div>' +
+      '<h4>Performance</h4>' +
+      '<p>Chapter splitting runs asynchronously on a background Web Worker thread (multithreading), so the UI stays smooth; pagination is measured for fluid page turns.</p>',
+    cfTitle: 'Confirm',
+    progDefault: 'Working…',
+    metaChap: '{n} ch', metaChars: '{n} chars',
+    metaRead: 'Read {p}%', metaUnread: 'Not started',
+    delBookTitle: 'Delete this book',
+    listEmptySearch: 'No matching books',
+    listEmptyHtml: 'The library is empty<br>Click "Import" in the top-right to start',
+    deleteTitle: 'Delete book',
+    deleteMsgHtml: 'Delete "{title}"?<br><span class="muted-text">Chapters and progress will be removed permanently. This cannot be undone.</span>',
+    deleteOk: 'Delete',
+    deletedMsg: 'Deleted "{title}"',
+    bookMissing: 'Book not found',
+    timeAgoJust: 'just now',
+    timeAgoMin: '{n} min ago',
+    timeAgoHour: '{n} h ago',
+    timeAgoDay: '{n} d ago',
+    noTxtFiles: 'Please choose .txt or .md text files',
+    importing: 'Importing ({a}/{b})',
+    importFail: 'Failed to import "{name}": {msg}',
+    dupTitle: 'Duplicate book detected',
+    dupMsgHtml: '"{title}" is already in your library (identical content).<br>Re-importing will <b>update the chapters and reset reading progress</b>. Continue?',
+    dupOk: 'Re-import',
+    reimported: 'Re-imported "{title}"',
+    imported: 'Imported "{title}"',
+    progSplit: 'Splitting chapters…',
+    progWorker: 'Working in a background thread',
+    progOrganize: 'Organizing chapters…',
+    progWrite: 'Saving to database…',
+    workerErr: 'Worker error: {msg}',
+    customTitleHtml: 'Custom entries <span class="muted-text" style="font-weight:400">(matched first)</span>',
+    cdWordPh: 'word / phrase', cdGlossPh: 'definition',
+    cdAdd: 'Add', cdDel: 'Delete',
+    cdEmpty: 'No custom entries yet — e.g. add notes for proper nouns in web novels.',
+    cdFill: 'Please fill in word and definition',
+    cdAdded: 'Entry added',
+    progCollect: 'Collecting data…',
+    progReadDb: 'Reading database',
+    progPackJson: 'Packing JSON',
+    progOverwrite: 'Overwriting…',
+    progMerge: 'Merging…',
+    progBooks: '{n} books total',
+    errBackupJson: 'The backup file is not valid JSON',
+    errBackupSchema: 'Not a backup from this reader (schema mismatch)',
+    exportedMsg: 'Backup saved: {name}<br>{books} books · {chapters} chapters · {chars} chars total',
+    exportFail: 'Export failed: {msg}',
+    importTitle: 'Import backup',
+    bkFileHtml: 'File: <b>{name}</b><br>',
+    bkTimeHtml: 'Exported: {t}<br>',
+    bkContainsHtml: 'Contains: <b>{books}</b> books, <b>{chapters}</b> chapters, <b>{positions}</b> positions<br><br>',
+    bkCharsHtml: 'About <b>{chars}</b> chars total<br><br>',
+    bkMergeHtml: '<b>Merge</b>: keep this device\'s books; only add non-duplicate content & progress.<br>',
+    bkOverwriteHtml: '<b>Overwrite</b>: clear all local data and fully restore the backup (recommended on a new device).',
+    mergeOk: 'Merge import',
+    overwriteExtra: 'Overwrite (clear current data)',
+    confirmOverwriteTitle: 'Confirm overwrite',
+    confirmOverwriteMsgHtml: 'Overwriting will <b>clear all books, progress and settings</b> on this device and restore the backup content. Continue?',
+    confirmOverwriteOk: 'Overwrite',
+    importDone: 'Import done: {books} books · {chapters} chapters · {positions} positions · {skipped} skipped',
+    importFail: 'Import failed: {msg}',
+    noStorage: 'No usable storage in this browser (IndexedDB/localStorage unavailable) — the app cannot run',
+    storageFull: 'localStorage quota exceeded: {msg} (consider a browser with IndexedDB)',
+    runtimeError: 'Runtime error',
+    errToast: 'Error: {msg}',
+    initFail: 'Init failed: {msg}',
+    defaultVoice: 'Default voice',
+  },
+};
+
+const I18N = {
+  lang: 'zh',
+  /** 取当前语言文案；缺失时回退中文，再缺失返回 key 本身 */
+  t(key, params) {
+    const table = I18N_LANGS[this.lang] || I18N_LANGS.zh;
+    let s = table[key];
+    if (s === undefined) s = I18N_LANGS.zh[key] ?? key;
+    if (params) {
+      for (const k of Object.keys(params)) {
+        s = s.split('{' + k + '}').join(String(params[k]));
+      }
+    }
+    return s;
+  },
+  /** 数字简写：中文 万/亿，英文 K/M */
+  fmt(n) {
+    if (n == null || isNaN(n)) return '0';
+    const trimZero = s => (s.indexOf('.') >= 0 ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+    if (this.lang === 'en') {
+      if (n >= 1e6) return trimZero((n / 1e6).toFixed(2)) + 'M';
+      if (n >= 1e3) return trimZero((n / 1e3).toFixed(1)) + 'K';
+      return String(n);
+    }
+    if (n >= 1e8) return (n / 1e8).toFixed(2) + ' 亿';
+    if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万';
+    return String(n);
+  },
+  /** 把静态文案应用到 DOM（data-i18n / data-i18n-ph / data-i18n-title / data-i18n-html） */
+  applyStatic() {
+    document.documentElement.lang = this.lang === 'zh' ? 'zh-CN' : 'en';
+    document.title = this.t('appTitle');
+    for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = this.t(el.dataset.i18n);
+    for (const el of document.querySelectorAll('[data-i18n-ph]')) el.placeholder = this.t(el.dataset.i18nPh);
+    for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = this.t(el.dataset.i18nTitle);
+    for (const el of document.querySelectorAll('[data-i18n-html]')) el.innerHTML = this.t(el.dataset.i18nHtml);
+    // 语言切换按钮显示目标语言
+    const btn = document.getElementById('btn-lang');
+    if (btn) btn.textContent = this.lang === 'zh' ? '🌐 EN' : '🌐 中';
+  },
+};
+
+/* ---------- 1. 事件总线 EventBus（观察者模式：模块间解耦） ---------- */
+class EventBus {
+  constructor() { this._map = new Map(); }
+  on(event, fn) {
+    if (!this._map.has(event)) this._map.set(event, []);
+    this._map.get(event).push(fn);
+    return () => this.off(event, fn);
+  }
+  off(event, fn) {
+    const list = this._map.get(event);
+    if (!list) return;
+    const i = list.indexOf(fn);
+    if (i >= 0) list.splice(i, 1);
+  }
+  emit(event, ...args) {
+    const list = this._map.get(event);
+    if (!list) return;
+    for (const fn of [...list]) { try { fn(...args); } catch (e) { console.error('[EventBus]', event, e); } }
+  }
+}
+
+/* ---------- 2. 存储层 Storage（抽象接口 + 两种实现） ----------
+ *  接口: init / putBook / getBook / getAllBooks / deleteBook /
+ *        putChapters / getChapters / deleteChapters /
+ *        putPosition / getPosition / getSetting / setSetting /
+ *        exportAll / importAll / clearAll
+ *  默认实现: IndexedDB（浏览器原生数据库，容量大、异步）
+ *  降级实现: localStorage（某些受限浏览器环境，容量小，会提示）
+ */
+class IndexedDBAdapter {
+  constructor() { this.name = 'novel_reader_db'; this.version = 1; this.db = null; }
+  get mode() { return 'indexeddb'; }
+
+  init() {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') return reject(new Error('no indexedDB'));
+      const req = indexedDB.open(this.name, this.version);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('books'))     db.createObjectStore('books', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('chapters'))   db.createObjectStore('chapters', { keyPath: ['bookId', 'index'] });
+        if (!db.objectStoreNames.contains('positions'))  db.createObjectStore('positions', { keyPath: 'bookId' });
+        if (!db.objectStoreNames.contains('settings'))   db.createObjectStore('settings', { keyPath: 'key' });
+      };
+      req.onsuccess = () => { this.db = req.result; resolve(); };
+      req.onerror    = () => reject(req.error || new Error('IndexedDB open failed'));
+      req.onblocked  = () => reject(new Error('IndexedDB blocked by another tab'));
+    });
+  }
+  _tx(store, mode) { return this.db.transaction(store, mode).objectStore(store); }
+  _req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+
+  async putBook(book)    { await this._req(this._tx('books', 'readwrite').put(book)); }
+  async getBook(id)      { return this._req(this._tx('books', 'readonly').get(id)); }
+  async getAllBooks()    { return this._req(this._tx('books', 'readonly').getAll()); }
+  async deleteBook(id) {
+    const tx = this.db.transaction(['books', 'chapters', 'positions'], 'readwrite');
+    tx.objectStore('books').delete(id);
+    const range = IDBKeyRange.bound([id, 0], [id, Number.MAX_SAFE_INTEGER]);
+    tx.objectStore('chapters').delete(range);
+    tx.objectStore('positions').delete(id);
+    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error); });
+  }
+
+  async putChapters(bookId, chapters) {
+    const store = this._tx('chapters', 'readwrite');
+    for (const ch of chapters) await this._req(store.put(ch));
+  }
+  async getChapters(bookId) {
+    const range = IDBKeyRange.bound([bookId, 0], [bookId, Number.MAX_SAFE_INTEGER]);
+    const all = await this._req(this._tx('chapters', 'readonly').getAll(range));
+    all.sort((a, b) => a.index - b.index);
+    return all;
+  }
+
+  async putPosition(pos)   { await this._req(this._tx('positions', 'readwrite').put(pos)); }
+  async getPosition(id)    { return this._req(this._tx('positions', 'readonly').get(id)); }
+
+  async getSetting(key) {
+    const row = await this._req(this._tx('settings', 'readonly').get(key));
+    return row ? row.value : undefined;
+  }
+  async setSetting(key, value) {
+    await this._req(this._tx('settings', 'readwrite').put({ key, value, updatedAt: nowStamp() }));
+  }
+
+  async exportAll() {
+    const books = await this._req(this._tx('books', 'readonly').getAll());
+    const chapters = [];
+    for (const b of books) chapters.push({ bookId: b.id, items: await this.getChapters(b.id) });
+    const positions = await this._req(this._tx('positions', 'readonly').getAll());
+    const settings  = await this._req(this._tx('settings', 'readonly').getAll());
+    return { books, chapters, positions, settings };
+  }
+
+  async importAll(data, mode) {
+    const report = { books: 0, chapters: 0, positions: 0, settings: 0, skipped: 0 };
+    if (mode === 'overwrite') await this.clearAll();
+    // merge 模式下 localIds = 导入前已存在的书籍；只有这些书的内容才需要「跳过保留本地」
+    const localIds = mode === 'merge' ? new Set((await this.getAllBooks()).map(b => b.id)) : new Set();
+    for (const bk of data.books || []) {
+      if (mode === 'merge' && localIds.has(bk.id)) { report.skipped++; continue; }
+      await this.putBook(bk); report.books++;
+    }
+    for (const cg of data.chapters || []) {
+      if (mode === 'merge' && localIds.has(cg.bookId)) { report.skipped += (cg.items || []).length; continue; }
+      for (const ch of cg.items || []) { await this._req(this._tx('chapters', 'readwrite').put(ch)); report.chapters++; }
+    }
+    for (const p of data.positions || []) {
+      if (mode === 'merge' && localIds.has(p.bookId)) { report.skipped++; continue; }
+      await this.putPosition(p); report.positions++;
+    }
+    for (const s of data.settings || []) {
+      if (mode === 'merge' && await this.getSetting(s.key) !== undefined) { report.skipped++; continue; }
+      await this.setSetting(s.key, s.value); report.settings++;
+    }
+    return report;
+  }
+
+  async clearAll() {
+    for (const store of ['books', 'chapters', 'positions', 'settings']) {
+      await this._req(this._tx(store, 'readwrite').clear());
+    }
+  }
+}
+
+class LocalStorageAdapter {
+  constructor() {
+    this.P = 'nr1';
+    try { this._test(); } catch (e) { throw new Error('localStorage unavailable'); }
+  }
+  get mode() { return 'localstorage'; }
+  _test() { localStorage.setItem(this.P + ':t', '1'); localStorage.removeItem(this.P + ':t'); }
+  _get(key, def) { try { const v = localStorage.getItem(key); return v == null ? def : JSON.parse(v); } catch { return def; } }
+  _set(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); }
+    catch (e) { throw new Error(I18N.t('storageFull', { msg: e.message })); }
+  }
+  async init() {}
+  async putBook(book) {
+    const list = this._get(this.P + ':books', []);
+    const i = list.findIndex(b => b.id === book.id);
+    if (i >= 0) list[i] = book; else list.push(book);
+    this._set(this.P + ':books', list);
+  }
+  async getBook(id) { return this._get(this.P + ':books', []).find(b => b.id === id) || null; }
+  async getAllBooks() { return this._get(this.P + ':books', []); }
+  async deleteBook(id) {
+    this._set(this.P + ':books', this._get(this.P + ':books', []).filter(b => b.id !== id));
+    localStorage.removeItem(`${this.P}:ch:${id}`);
+    localStorage.removeItem(`${this.P}:pos:${id}`);
+  }
+  async putChapters(bookId, chapters) {
+    const existing = this._get(`${this.P}:ch:${bookId}`, []);
+    const map = new Map(existing.map(c => [c.index, c]));
+    for (const ch of chapters) map.set(ch.index, ch);
+    this._set(`${this.P}:ch:${bookId}`, [...map.values()].sort((a, b) => a.index - b.index));
+  }
+  async getChapters(bookId) { return this._get(`${this.P}:ch:${bookId}`, []); }
+  async putPosition(pos)    { this._set(`${this.P}:pos:${pos.bookId}`, pos); }
+  async getPosition(id)     { return this._get(`${this.P}:pos:${id}`, null); }
+  async getSetting(key)     { const all = this._get(this.P + ':settings', {}); return all[key]; }
+  async setSetting(key, value) {
+    const all = this._get(this.P + ':settings', {});
+    all[key] = value; this._set(this.P + ':settings', all);
+  }
+  async exportAll() {
+    const books = await this.getAllBooks();
+    const chapters = [], positions = [];
+    for (const b of books) {
+      chapters.push({ bookId: b.id, items: await this.getChapters(b.id) });
+      const p = await this.getPosition(b.id);
+      if (p) positions.push(p);
+    }
+    const s = this._get(this.P + ':settings', {});
+    return { books, chapters, positions, settings: Object.entries(s).map(([key, value]) => ({ key, value })) };
+  }
+  async importAll(data, mode) {
+    const report = { books: 0, chapters: 0, positions: 0, settings: 0, skipped: 0 };
+    const localIds = mode === 'merge' ? new Set((await this.getAllBooks()).map(b => b.id)) : new Set();
+    if (mode === 'overwrite') {
+      await this.clearAll();
+    }
+    for (const bk of data.books || []) {
+      if (mode === 'merge' && localIds.has(bk.id)) { report.skipped++; continue; }
+      await this.putBook(bk); report.books++;
+    }
+    for (const cg of data.chapters || []) {
+      if (mode === 'merge' && localIds.has(cg.bookId)) { report.skipped += (cg.items || []).length; continue; }
+      await this.putChapters(cg.bookId, cg.items || []); report.chapters += (cg.items || []).length;
+    }
+    for (const p of data.positions || []) {
+      if (mode === 'merge' && localIds.has(p.bookId)) { report.skipped++; continue; }
+      await this.putPosition(p); report.positions++;
+    }
+    for (const s of data.settings || []) {
+      const all = this._get(this.P + ':settings', {});
+      if (mode === 'merge' && all[s.key] !== undefined) { report.skipped++; continue; }
+      all[s.key] = s.value; this._set(this.P + ':settings', all); report.settings++;
+    }
+    return report;
+  }
+  async clearAll() {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(this.P + ':')) keys.push(k);
+    }
+    keys.forEach(k => localStorage.removeItem(k));
+  }
+}

@@ -1,0 +1,561 @@
+
+/* ---------- 3. 文本编解码 ---------- */
+/** 字节 → 文本：尝试 UTF-8(含BOM)，失败则 GBK，再失败则 Big5，最后 UTF-8 宽松模式 */
+function decodeTextBytes(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let offset = 0;
+  if (u8.length >= 3 && u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) offset = 3;
+  const slice = u8.subarray(offset);
+  const tryDecode = (enc, fatal) => {
+    try { return { text: new TextDecoder(enc, { fatal }).decode(slice), encoding: enc }; }
+    catch { return null; }
+  };
+  for (const enc of ['utf-8', 'gbk', 'big5']) {
+    const r = tryDecode(enc, true);
+    if (r) return r;
+  }
+  return { text: new TextDecoder('utf-8', { fatal: false }).decode(slice), encoding: 'utf-8(宽松)' };
+}
+
+/* ---------- 4. 章节切分（纯函数，同时用于 Web Worker 与主线程降级） ---------- */
+/**
+ * 把整本小说文本切分为章节数组。
+ * 规则: 优先按「第X章/卷/节」等标题行识别；标题行识别不足 2 个时，
+ *       退化为按固定字数切块，保证任何文本都能阅读。
+ * 返回: { chapters: [{index, title, paras: string[], chars}], totalChars }
+ */
+function splitChapters(text, opts = {}) {
+  const targetChars = opts.targetChars || 4500;
+  // 归一化换行 & 去掉 \r
+  let t = text.replace(/\r\n?/g, '\n').replace(/\uFEFF/g, '');
+  const lines = t.split('\n');
+
+  // --- 标题行识别 ---
+  const titleRe = [
+    /^\s*第\s*[0-9０-９零一二三四五六七八九十百千万两〇]+\s*[章节卷回部集篇][^\n]{0,60}\s*$/,  // 第十二章 风云
+    /^\s*(?:序\s*章|楔\s*子|前\s*言|引\s*子|题\s*记|尾\s*声|后\s*记|番\s*外|终\s*章|结\s*语)\s*$/, // 章节性段落
+    /^\s*(?:chapter|volume|part|book)\s+[0-9]{1,5}\s*[.:：]?\s*[^\n]{0,60}$/i,                  // Chapter 12: ...
+  ];
+  const isTitle = (s) => titleRe.some(re => re.test(s));
+
+  // 第一章的标题可能带后续内容（如「第一章 风起 洛城客栈中……」），只在确实无匹配时兜底
+  const idx = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isTitle(lines[i]) && lines[i].length <= 80) idx.push(i);
+  }
+
+  let chapters;
+  if (idx.length >= 2) {
+    // 主/卷目录中「第X章」跟正文分离的常见处理：标题行并入下一个正文段之前，跳过重复的空标题
+    const starts = [...idx, lines.length];
+    chapters = [];
+    let title = null;
+    let paras = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (isTitle(lines[i]) && lines[i].length <= 80) {
+        if (title !== null) chapters.push({ title, paras });
+        title = lines[i].replace(/^\s+|\s+$/g, '');
+        paras = [];
+      } else {
+        const s = lines[i].replace(/\s+/g, '').trim();
+        if (s) paras.push(s);
+      }
+    }
+    if (title !== null) chapters.push({ title, paras });
+    if (chapters.length === 0) chapters = null; // 全空：退回按块切分
+  }
+
+  // --- 兜底：按段落块 → 按目标字数切块 ---
+  if (!chapters) {
+    const blocks = [];
+    let cur = [];
+    let curLen = 0;
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s) {
+        if (cur.length) { blocks.push(cur); cur = []; curLen = 0; }
+        continue;
+      }
+      cur.push(s);
+      curLen += s.length;
+      if (curLen >= targetChars) { blocks.push(cur); cur = []; curLen = 0; }
+    }
+    if (cur.length) blocks.push(cur);
+    if (!blocks.length) blocks.push([]);
+    let merged = [];
+    for (const b of blocks) merged = merged.concat(b);
+    if (merged.length === 0) merged = ['（空白文档：无内容）'];
+    // 把段落聚成「节」；超长段落按字符切段，保证任意文本都能被分章
+    chapters = [];
+    let chunk = [];
+    let len = 0;
+    const flushChunk = () => {
+      if (chunk.length) { chapters.push(chunk); chunk = []; len = 0; }
+    };
+    const addPara = (p) => {
+      let rest = p;
+      while (rest.length > targetChars) {
+        const piece = rest.slice(0, targetChars);
+        chunk.push(piece); len += piece.length;
+        flushChunk();
+        rest = rest.slice(targetChars);
+      }
+      chunk.push(rest); len += rest.length;
+      if (len >= targetChars) flushChunk();
+    };
+    for (const p of merged) addPara(p);
+    flushChunk();
+    chapters = chapters.map((chunk, i) => ({
+      title: `第 ${i + 1} 节`,
+      paras: chunk,
+    }));
+  }
+
+  // --- 过滤空章节 / 计算字数 ---
+  chapters = chapters
+    .filter(c => c.paras.length > 0)
+    .map((c, i) => {
+      const chars = c.paras.reduce((n, p) => n + p.length, 0);
+      return { index: i, title: c.title || `第 ${i + 1} 节`, paras: c.paras, chars };
+    });
+  if (!chapters.length) {
+    chapters = [{ index: 0, title: '正文', paras: ['（没有可显示的正文内容）'], chars: 0 }];
+  }
+  const totalChars = chapters.reduce((n, c) => n + c.chars, 0);
+  return { chapters, totalChars };
+}
+
+/* ---------- 5. 后台 Worker（多线程） ---------- */
+/*  优先把章节切分放到独立线程执行，主线程保持流畅；
+ *  若 Worker 创建失败（受限环境），自动降级为在主线程同步执行（对应函数见上）。 */
+const WORKER_SCRIPT = `'use strict';
+${splitChapters.toString()}
+self.onmessage = (e) => {
+  const { id, text } = e.data || {};
+  try {
+    const r = splitChapters(text);
+    self.postMessage({ id, ok: true, chapters: r.chapters, totalChars: r.totalChars });
+  } catch (err) {
+    self.postMessage({ id, ok: false, error: String(err && err.stack || err) });
+  }
+};`;
+
+class TextWorker {
+  constructor() {
+    this.worker = null;
+    this.seq = 0;
+    this.pending = new Map();
+  }
+  get available() { return !!this.worker; }
+
+  static create() {
+    const w = new TextWorker();
+    try {
+      const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      w.worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      w.worker.onmessage = (e) => {
+        const { id, ok, error, ...rest } = e.data || {};
+        const p = w.pending.get(id);
+        if (!p) return;
+        w.pending.delete(id);
+        ok ? p.resolve(rest) : p.reject(new Error(error));
+      };
+      w.worker.onerror = (e) => {
+        w.worker = null;
+        for (const p of w.pending.values()) p.reject(new Error(I18N.t('workerErr', { msg: e.message })));
+        w.pending.clear();
+      };
+    } catch (e) {
+      console.warn('Web Worker 不可用，将使用主线程切分:', e);
+      w.worker = null;
+    }
+    return w;
+  }
+
+  /** 切分文本；Worker 不可用时主线程执行（同为异步接口，调用方无感知） */
+  split(text) {
+    if (!this.worker) {
+      // 分片让出主线程，避免大文件阻塞 UI（异步编程）
+      return new Promise(resolve => {
+        setTimeout(() => {
+          const r = splitChapters(text);
+          resolve({ chapters: r.chapters, totalChars: r.totalChars });
+        }, 0);
+      });
+    }
+    return new Promise((resolve, reject) => {
+      const id = ++this.seq;
+      this.pending.set(id, { resolve, reject });
+      this.worker.postMessage({ id, text });
+    });
+  }
+  destroy() { if (this.worker) { this.worker.terminate(); this.worker = null; } }
+}
+
+/* ---------- 6. 数据管理 DataManager（仓库模式：统一书籍/章节/进度/设置的读写） ---------- */
+class DataManager {
+  constructor(adapter, bus) {
+    this.adapter = adapter;
+    this.bus = bus;
+    this._booksCache = null;
+    this.requestId = 0;
+  }
+  get mode() { return this.adapter.mode; }
+
+  /* ---- 书籍 ---- */
+  async listBooks() {
+    if (!this._booksCache) {
+      const books = await this.adapter.getAllBooks();
+      books.forEach(b => { if (!b.chapterChars) b.chapterChars = []; });
+      this._booksCache = books;
+    }
+    return this._booksCache.slice().sort((a, b) => (b.lastReadAt || 0) > (a.lastReadAt || 0) ? 1 : -1);
+  }
+  async getBook(id) {
+    const b = await this.adapter.getBook(id);
+    if (b && !b.chapterChars) b.chapterChars = [];
+    return b;
+  }
+  async saveBook(book) {
+    if (this._booksCache) {
+      const i = this._booksCache.findIndex(b => b.id === book.id);
+      if (i >= 0) this._booksCache[i] = book; else this._booksCache.push(book);
+    }
+    await this.adapter.putBook(book);
+    this.bus.emit('books:changed');
+  }
+  async deleteBook(id) {
+    this._booksCache = null;
+    await this.adapter.deleteBook(id);
+    this.bus.emit('books:changed');
+  }
+
+  /* ---- 导入 ---- */
+  /** 计算书籍 ID（内容哈希，可复现 → 相同文件识别为同一本书） */
+  static bookIdOf(text) {
+    const sample = (text.length > 2048 ? text.slice(0, 1024) + text.slice(text.length - 1024) : text) + ':' + text.length;
+    return 'book_' + fnv1a(sample);
+  }
+
+  /**
+   * 导入文本。返回 { duplicate, book }；duplicate 时 book 为已存在的旧书籍。
+   */
+  async importText({ title, sourceName, text }) {
+    const id = DataManager.bookIdOf(text);
+    const existing = await this.getBook(id);
+    if (existing) {
+      return { duplicate: true, book: existing };
+    }
+    const book = await this._splitAndSave(id, title, sourceName, text);
+    return { duplicate: false, book };
+  }
+
+  /** 覆盖导入（去重确认后）：保留同一 id，重置阅读进度 */
+  async replaceBook({ id, title, sourceName, text }) {
+    const book = await this._splitAndSave(id, title, sourceName, text);
+    await this.adapter.putPosition({ bookId: id, chapterIndex: 0, pageIndex: 0, percent: 0, charOffset: 0, updatedAt: nowStamp() });
+    return book;
+  }
+
+  async _splitAndSave(id, title, sourceName, text) {
+    const now = Date.now();
+    const book = {
+      id,
+      title: title || sourceName || I18N.t('untitled'),
+      sourceName: sourceName || '',
+      encoding: '',
+      size: text.length,
+      importedAt: now,
+      updatedAt: now,
+      lastReadAt: 0,
+      percent: 0,
+      hash: DataManager.bookIdOf(text),
+    };
+    const progress = progressUI();
+    progress.show(I18N.t('progSplit'));
+    progress.setSub(I18N.t('progWorker'));
+    progress.set(0.05);
+    // 切分（Web Worker 线程 / 主线程降级）
+    const { chapters, totalChars } = await this._worker.split(text);
+    progress.setSub(I18N.t('progOrganize'));
+    book.chapterCount = chapters.length;
+    book.totalChars = totalChars;
+    book.chapterChars = chapters.map(c => c.chars);
+    book.chapterTitles = chapters.map(c => c.title);
+    // 写入数据库（异步分批）
+    progress.show(I18N.t('progWrite'));
+    const list = chapters.map((c, i) => ({
+      bookId: id, index: i, title: c.title, paras: c.paras, chars: c.chars,
+    }));
+    for (let i = 0; i < list.length; i += 200) {
+      const batch = list.slice(i, i + 200);
+      await this.adapter.putChapters(id, batch);
+      progress.set(0.1 + 0.85 * (Math.min(i + 200, list.length) / list.length));
+    }
+    book.updatedAt = Date.now();
+    progress.set(0.97);
+    await this.saveBook(book);
+    progress.set(1);
+    progress.done();
+    return book;
+  }
+
+  /* ---- 章节 ---- */
+  async loadChapters(bookId) {
+    const chapters = await this.adapter.getChapters(bookId);
+    return chapters;
+  }
+
+  /* ---- 阅读进度 ---- */
+  async savePosition({ bookId, chapterIndex, pageIndex, percent, charOffset }) {
+    const pos = { bookId, chapterIndex, pageIndex, percent, charOffset, updatedAt: nowStamp() };
+    await this.adapter.putPosition(pos);
+    const book = await this.getBook(bookId);
+    if (book) {
+      book.percent = percent;
+      book.lastReadAt = Date.now();
+      await this.saveBook(book);
+    }
+    return pos;
+  }
+  async getPosition(bookId) { return this.adapter.getPosition(bookId); }
+
+  /* ---- 设置 ---- */
+  async getSetting(key, def) { const v = await this.adapter.getSetting(key); return v === undefined ? def : v; }
+  async setSetting(key, value) {
+    await this.adapter.setSetting(key, value);
+    this.bus.emit('settings:changed', { key, value });
+  }
+
+  /* ---- 备份 ---- */
+  async exportAll() { return this.adapter.exportAll(); }
+  async importAll(data, mode) { return this.adapter.importAll(data, mode); }
+}
+
+/* ---------- 7. 词典服务 DictionaryService（策略模式：多部离线词典可切换） ---------- */
+/*  词典数据以「word|释义」文本行内嵌打包（见 dict-data 一节），运行时解析为 Map，
+ *  支持: 英→中、中→英（含最大正向匹配分词）、成语解释、汉字逐字详解，
+ *  以及用户自定义词条（持久化于设置中，查询优先级最高）。 */
+class DictionaryService {
+  constructor(bus) {
+    this.bus = bus;
+    this.maps = {};        // dictId -> Map<word, gloss>
+    this.firstChars = {};  // dictId -> Set<首字符>（用于中文最大匹配加速）
+    this.custom = [];      // 用户自定义词条 [{word, gloss}]
+    this._inited = false;
+  }
+
+  /** 词典元信息（策略注册表） */
+  static get DICTS() {
+    return [
+      { id: 'en2cn',  name: '英 译 中', hint: '英语单词/短语 → 中文释义' },
+      { id: 'cn2en',  name: '中 译 英', hint: '中文常用词 → 英语释义' },
+      { id: 'idioms', name: '成语解释', hint: '四字成语 / 惯用语释义' },
+      { id: 'chars',  name: '汉字详解', hint: '常见汉字 → 简明释义' },
+    ];
+  }
+
+  async init(customEntries) {
+    this.custom = customEntries || [];
+    this._inited = true;
+    for (const d of DictionaryService.DICTS) this._buildMap(d.id, RAW_DICTS[d.id]);
+  }
+
+  _buildMap(id, raw) {
+    const map = new Map();
+    const firsts = new Set();
+    for (const line of raw.split('\n')) {
+      const i = line.indexOf('|');
+      if (i <= 0) continue;
+      const word = line.slice(0, i).trim();
+      const gloss = line.slice(i + 1).trim();
+      if (!word || !gloss) continue;
+      map.set(word, gloss);
+      if (word.length <= 4) firsts.add(word[0]);
+    }
+    this.maps[id] = map;
+    this.firstChars[id] = firsts;
+  }
+
+  /** 自定义词条（设置持久化） */
+  customMap() {
+    const m = new Map();
+    for (const c of this.custom) { const g = String(c.gloss || '').trim(); if (c.word && g) m.set(String(c.word).trim(), g); }
+    return m;
+  }
+
+  async addCustomEntry(word, gloss) {
+    word = String(word).trim(); gloss = String(gloss).trim();
+    if (!word || !gloss) return false;
+    const i = this.custom.findIndex(c => c.word === word);
+    if (i >= 0) this.custom[i] = { word, gloss }; else this.custom.push({ word, gloss });
+    await this._emitCustom();
+    return true;
+  }
+  async removeCustomEntry(word) {
+    this.custom = this.custom.filter(c => c.word !== word);
+    await this._emitCustom();
+  }
+  async _emitCustom() {
+    this.bus.emit('dict:custom-changed', this.custom);
+  }
+
+  lookup(word, dictId) {
+    const g = this.customMap().get(word);
+    if (g) return { dict: '自定义', gloss: g };
+    const gloss = this.maps[dictId] && this.maps[dictId].get(word);
+    if (gloss) return { dict: dictId, gloss };
+    return null;
+  }
+
+  /** 文本语言检测: 中文为主返回 'cn'，否则 'en' */
+  static detectLang(text) {
+    if (!text) return 'cn';
+    let cjk = 0, total = 0;
+    for (const ch of text) {
+      if (/\s/.test(ch)) continue;
+      total++;
+      if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) cjk++;
+    }
+    return total > 0 && cjk / total >= 0.35 ? 'cn' : 'en';
+  }
+
+  /** 英文分词: 提取 [A-Za-z']+ 单词序列（保留位置用于映射回原文） */
+  static tokenizeEn(text) {
+    const tokens = [];
+    const re = /[A-Za-z'][A-Za-z']*/g;
+    let m;
+    while ((m = re.exec(text))) tokens.push({ word: m[0], start: m.index, end: m.index + m[0].length });
+    // 合并为位置区间（含间隔），用于整句翻译
+    return tokens;
+  }
+
+  /**
+   * 翻译一段文本。
+   * 中文: 最大正向匹配分词（词典优先 → 逐字兜底）。
+   * 英文: 单词区序列，尝试最长 1-4 词短语匹配。
+   * 返回 { lang, segments: [{txt, gloss|null, dict|null}], glossText, unknown }
+   */
+  translate(text) {
+    text = text.replace(/\s+/g, ' ').trim();
+    const lang = DictionaryService.detectLang(text);
+    if (lang === 'en') return this._translateEn(text);
+    return this._translateCn(text);
+  }
+
+  _translateCn(text) {
+    const segs = [];
+    const keyset = new Set([...this.maps.cn2en.keys()].filter(k => k.length <= 4));
+    let i = 0;
+    const N = text.length;
+    while (i < N) {
+      let hit = null;
+      const maxLen = Math.min(4, N - i);
+      for (let L = maxLen; L >= 1; L--) {
+        const word = text.slice(i, i + L);
+        if (keyset.has(word)) { hit = { word, dict: 'cn2en' }; break; }
+      }
+      if (hit) {
+        segs.push({ txt: hit.word, gloss: this.maps.cn2en.get(hit.word), dict: hit.dict });
+        i += hit.word.length;
+      } else {
+        const ch = text[i];
+        const charGloss = this.maps.chars.get(ch);
+        segs.push({ txt: ch, gloss: charGloss || null, dict: charGloss ? 'chars' : null });
+        i += 1;
+      }
+    }
+    return {
+      lang: 'cn',
+      segments: segs,
+      glossText: segs.map(s => (s.gloss ? `${s.txt}(${s.gloss})` : s.txt)).join(' '),
+      unknown: segs.filter(s => !s.gloss).map(s => s.txt),
+    };
+  }
+
+  _translateEn(text) {
+    const tokens = DictionaryService.tokenizeEn(text);
+    const map = this.maps.en2cn;
+    const segs = [];
+    let li = 0;
+    while (li < tokens.length) {
+      let hit = null;
+      // 尝试最长 4 词短语
+      for (let L = Math.min(4, tokens.length - li); L >= 1; L--) {
+        const phrase = tokens.slice(li, li + L).map(t => t.word).join(' ').toLowerCase();
+        const g = this.customMap().get(phrase) || map.get(phrase);
+        if (g) { hit = { phrase, gloss: g, len: L }; break; }
+      }
+      if (hit) {
+        const raw = tokens.slice(li, li + hit.len);
+        segs.push({
+          txt: raw.map(t => t.word).join(' '),
+          gloss: hit.gloss,
+          dict: 'en2cn',
+        });
+        li += hit.len;
+      } else {
+        const t = tokens[li];
+        const stem = this._stem(t.word.toLowerCase());
+        const g = this.customMap().get(stem) || map.get(stem);
+        segs.push({ txt: t.word, gloss: g || null, dict: g ? 'en2cn' : null });
+        li += 1;
+      }
+    }
+    return {
+      lang: 'en',
+      segments: segs,
+      glossText: segs.map(s => (s.gloss ? `${s.txt} → ${s.gloss}` : s.txt)).join('；'),
+      unknown: segs.filter(s => !s.gloss).map(s => s.txt),
+    };
+  }
+
+  /** 简单词干还原（-s -es -ed -ing 型） */
+  _stem(w) {
+    if (w.length <= 4) return w;
+    for (const suf of ['ing', 'es', 'ed', 's']) {
+      if (w.endsWith(suf) && w.length - suf.length >= 3) return w.slice(0, -suf.length).replace(/ie$/, 'y').replace(/e$/, '');
+    }
+    return w;
+  }
+
+  /** 中文解释：成语 + 词语 + 逐字 + 未知字 */
+  explain(text) {
+    text = text.replace(/\s+/g, '').trim();
+    if (!text) return null;
+    const res = { idiom: null, words: [], chars: [], unknown: [] };
+    // 成语 / 惯用语整条匹配
+    if (this.maps.idioms.has(text)) res.idiom = { word: text, gloss: this.maps.idioms.get(text) };
+    else if (text.length <= 12) {
+      // 尝试在文本内找到最长成语
+      let best = null;
+      for (let i = 0; i < text.length; i++) {
+        for (let L = Math.min(4, text.length - i); L >= 3; L--) {
+          const w = text.slice(i, i + L);
+          const g = this.maps.idioms.get(w);
+          if (g) { best = { word: w, gloss: g, start: i }; break; }
+        }
+        if (best) break;
+      }
+      if (best) res.idiom = best;
+    }
+    // 词语最大匹配
+    const keyset = new Set([...this.maps.cn2en.keys()].filter(k => k.length <= 4));
+    let i = 0;
+    while (i < text.length) {
+      let hit = null;
+      for (let L = Math.min(4, text.length - i); L >= 1; L--) {
+        const w = text.slice(i, i + L);
+        if (keyset.has(w)) { hit = { word: w, gloss: this.maps.cn2en.get(w) }; break; }
+      }
+      if (hit) { res.words.push(hit); i += hit.word.length; }
+      else { res.chars.push(text[i]); i += 1; }
+    }
+    for (const ch of [...new Set(res.chars)]) {
+      if (!this.maps.chars.has(ch)) res.unknown.push(ch);
+    }
+    return res;
+  }
+}

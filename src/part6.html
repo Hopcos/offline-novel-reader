@@ -1,0 +1,679 @@
+
+/* ---------- 9. 语音朗读 TTSManager（浏览器原生 SpeechSynthesis 封装） ---------- */
+class TTSManager {
+  constructor() {
+    this.supported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+    this.voices = [];
+    this.rate = 1;
+    this.voice = null;      // 当前选择 voiceURI
+    this.queue = [];        // [{text, onstart, onend}]
+    this.cur = null;
+    this._onVoices = [];
+    if (this.supported) {
+      const load = () => {
+        this.voices = speechSynthesis.getVoices() || [];
+        for (const fn of this._onVoices) fn(this.voices);
+      };
+      load();
+      speechSynthesis.addEventListener && speechSynthesis.addEventListener('voiceschanged', load);
+    }
+  }
+  onVoices(fn) {
+    this._onVoices.push(fn);
+    if (this.voices.length) fn(this.voices);
+  }
+  setRate(r) { this.rate = clampNum(r, 0.5, 2); }
+  setVoice(uri) { this.voice = this.voices.find(v => v.voiceURI === uri) || this.voices.find(v => v.lang && v.lang.toLowerCase().startsWith('zh')) || null; }
+
+  enqueue(text, opts = {}) {
+    text = String(text).trim();
+    if (!text) { opts.onend && opts.onend(); return; }
+    this.queue.push({ text, onstart: opts.onstart, onend: opts.onend });
+    this._pump();
+  }
+  _pump() {
+    if (!this.supported) { this.queue = []; return; }
+    if (this.cur || this.queue.length === 0) return;
+    const item = this.queue.shift();
+    const u = new SpeechSynthesisUtterance(item.text);
+    u.rate = this.rate;
+    u.voice = this.voice || null;
+    u.lang = u.voice ? u.voice.lang : (this._langFor(item.text) === 'cn' ? 'zh-CN' : 'en-US');
+    const done = () => { this.cur = null; item.onend && item.onend(); this._pump(); };
+    u.onstart = () => item.onstart && item.onstart();
+    u.onend = done;
+    u.onerror = (e) => { console.warn('TTS error', e.error); done(); };
+    this.cur = u;
+    // 部分浏览器长句 15 秒会被掐断: 入队前已按句切分, 这里再防抖一下
+    try { speechSynthesis.speak(u); } catch (e) { done(); }
+  }
+  _langFor(text) { return DictionaryService.detectLang(text); }
+  stop() {
+    if (!this.supported) return;
+    this.queue = [];
+    this.cur = null;
+    speechSynthesis.cancel();
+  }
+  pause() { if (this.supported) speechSynthesis.pause(); }
+  resume() { if (this.supported) speechSynthesis.resume(); }
+  get speaking() { return this.supported && (this.cur != null || this.queue.length > 0 || speechSynthesis.speaking); }
+  /** 朗读单段文本（供划词朗读等使用） */
+  speakOnce(text, rate, voiceURI, onend) {
+    this.setRate(rate); this.setVoice(voiceURI);
+    this.enqueue(text, { onend });
+  }
+}
+function clampNum(n, a, b) { return Math.min(b, Math.max(a, n)); }
+
+/* ---------- 10. 排版引擎：断行 + 分页（测量式分页，异步不阻塞 UI） ---------- */
+/**
+ * LineBreaker: 用 canvas.measureText 按真实宽度断行（中文按字符、英文按单词边界）
+ */
+class LineBreaker {
+  constructor() {
+    this.canvas = document.createElement('canvas');
+    this.ctx = this.canvas.getContext ? this.canvas.getContext('2d') : null;
+    this._measureCache = new Map(); // 缓存 "font|text" → 宽度（上限控制）
+    this._cacheMax = 60000;
+  }
+  fontString(fontSize, family) { return `${fontSize}px ${family}`; }
+  measure(text, font) {
+    if (!this.ctx) return null; // 无 canvas 时返回 null → 走估算
+    const key = font + '|' + text;
+    let w = this._measureCache.get(key);
+    if (w == null) {
+      this.ctx.font = font;
+      w = this.ctx.measureText(text).width;
+      if (this._measureCache.size >= this._cacheMax) this._measureCache.clear();
+      this._measureCache.set(key, w);
+    }
+    return w;
+  }
+  /** 估算宽度（无 canvas 兜底）：CJK≈1em, ASCII≈0.55em */
+  estimate(text, fontSize) {
+    let w = 0;
+    for (const ch of text) {
+      w += /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? fontSize : fontSize * 0.55;
+    }
+    return w;
+  }
+  /** 20ms 时间片内让出主线程（异步编程：大章节分页不卡 UI） */
+  static async yield() {
+    await new Promise(r => setTimeout(r, 0));
+  }
+  /** 二分查找: 在 [start,len] 内找最大可容纳的断点（≤ maxW） */
+  _findBreak(text, start, maxW, font, fontSize) {
+    let lo = start + 1;
+    let hi = text.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      const w = this.measure(text.slice(start, mid), font) ?? this.estimate(text.slice(start, mid), fontSize);
+      if (w <= maxW) lo = mid; else hi = mid - 1;
+    }
+    if (lo === start) lo = Math.min(text.length, start + Math.max(1, Math.floor(maxW / fontSize)));
+    return lo;
+  }
+
+  /** 返回行区间数组 [[s,e], ...]（每 80 行让出一次主线程） */
+  async breakLines(text, maxW, font, fontSize) {
+    const lines = [];
+    let start = 0;
+    let count = 0;
+    while (start < text.length) {
+      const end = this._findBreak(text, start, maxW, font, fontSize);
+      lines.push([start, end]);
+      start = end;
+      count++;
+      if (count % 80 === 0) await LineBreaker.yield();
+    }
+    return lines;
+  }
+}
+
+/**
+ * ChapterPager: 把一章的段落排成“页”。
+ * 页内数据: { lines: [{p, s, e}], startChar, endChar }
+ *  - p: 段落下标  s/e: 该段落内的字符区间（跨页可拆分）
+ */
+class ChapterPager {
+  constructor({ pageW, pageH, vPad, fontSize, lineHeight, fontFamily, breaker }) {
+    this.pageW = pageW; this.pageH = pageH; this.vPad = vPad;
+    this.fontSize = fontSize; this.lineHeight = lineHeight;
+    this.fontFamily = fontFamily;
+    this.breaker = breaker;
+    this.font = breaker.fontString(fontSize, fontFamily);
+    this.lineH = Math.round(fontSize * lineHeight);
+    this.availH = Math.max(60, pageH - vPad * 2);
+    this.maxLines = Math.max(1, Math.floor(this.availH / this.lineH));
+  }
+
+  async paginate(paras) {
+    const pages = [];
+    let group = [];          // 正在填充的页
+    let groupStartChar = 0;
+    let groupChars = 0;
+    let charTotal = 0;       // 已排入行的章节字符数（供 percent 用）
+    const flush = () => {
+      if (!group.length) return;
+      pages.push({
+        lines: group.slice(),
+        startChar: groupStartChar,
+        endChar: groupStartChar + groupChars,
+      });
+      group = [];
+      groupChars = 0;
+    };
+    let lineCount = 0;
+    const maxW = Math.max(80, this.pageW); // pageW 已扣除内边距
+
+    for (let p = 0; p < paras.length; p++) {
+      const text = paras[p];
+      if (!text) continue;
+      if (group.length === 0) groupStartChar = charTotal;
+      let paraLines = [];
+      try {
+        paraLines = await this.breaker.breakLines(text, maxW, this.font, this.fontSize);
+      } catch (e) {
+        // 极端情况兜底：整段作为一行
+        paraLines = [[0, text.length]];
+      }
+      for (const [s, e] of paraLines) {
+        if (group.length >= this.maxLines) flush();
+        if (group.length === 0) groupStartChar = charTotal;
+        group.push({ p, s, e });
+        groupChars += e - s;
+        charTotal += e - s;
+        lineCount++;
+      }
+    }
+    flush();
+
+    // 最后一页过短时并入前一页（避免孤行）
+    if (pages.length > 1) {
+      const last = pages[pages.length - 1];
+      if (last.lines.length <= 2) {
+        const prev = pages[pages.length - 2];
+        prev.lines.push(...last.lines);
+        prev.endChar = last.endChar;
+        pages.pop();
+      }
+    }
+
+    const charCount = paras.reduce((n, t) => n + t.length, 0);
+    return { pages, charCount, lineCount };
+  }
+}
+
+/* ---------- 11. 阅读控制器 Reader ---------- */
+class Reader {
+  constructor(bus) {
+    this.bus = bus;
+    this.breaker = new LineBreaker();
+    this.book = null;
+    this.chapters = null;          // [{index,title,paras,chars}]
+    this.chapterIndex = -1;
+    this.pageIndex = -1;
+    this._pagesCache = new Map();  // chapterIndex -> {pages, charCount, pagerCtx}
+    this._metrics = null;
+    this.reading = false;
+    this.readingMode = 'page';     // page: 页级连续朗读
+    this.hotZonesOn = true;
+
+    this.el = {
+      root: $('#reader'),
+      empty: $('#reader-empty'),
+      title: $('#rt-title'),
+      pageLabel: $('#rt-page'),
+      percent: $('#rt-percent'),
+      content: $('#page-content'),
+      ttsPlay: $('#tts-play'),
+      ttsStop: $('#tts-stop'),
+      btnPrev: $('#btn-page-prev'),
+      btnNext: $('#btn-page-next'),
+      chapPrev: $('#btn-chap-prev'),
+      chapNext: $('#btn-chap-next'),
+      toc: $('#btn-toc'),
+    };
+    this.tts = new TTSManager();
+    this.savePos = debounce(() => this._persistPosition(), 500);
+    this._bindUI();
+  }
+
+  /* ---------- 打开 / 关闭 ---------- */
+  async openBook(book) {
+    this.stopReading();
+    this.book = book;
+    this.chapters = await this.data.loadChapters(book.id);
+    this._pagesCache.clear();
+    this.el.root.classList.add('show');
+    this.el.empty.style.display = 'none';
+    this.el.title.textContent = book.title || I18N.t('untitled');
+    this.bus.emit('books:changed');
+    // 等待一帧让布局生效后再测量分页
+    await new Promise(r => requestAnimationFrame(() => r()));
+    await new Promise(r => requestAnimationFrame(() => r()));
+    this._refreshMetrics();
+    // 恢复上次阅读位置
+    const pos = await this.data.getPosition(book.id);
+    if (pos && pos.chapterIndex < this.chapters.length) {
+      const prefix = this._prefixChars(pos.chapterIndex);
+      await this.gotoChapter(pos.chapterIndex, -1, pos.charOffset != null ? pos.charOffset - prefix : -1);
+    } else {
+      await this.gotoChapter(0, 0);
+    }
+    this.bus.emit('reader:open', { book });
+  }
+
+  closeBook() {
+    this.stopReading();
+    this.book = null;
+    this.chapters = null;
+    this.el.root.classList.remove('show');
+    this.el.empty.style.display = '';
+    this.bus.emit('reader:close');
+  }
+
+  /* ---------- 度量与排版 ---------- */
+  _refreshMetrics() {
+    const content = this.el.content;
+    const cs = getComputedStyle(content);
+    const padL = parseFloat(cs.paddingLeft) || 0;
+    const padR = parseFloat(cs.paddingRight) || 0;
+    const padT = parseFloat(cs.paddingTop) || 0;
+    const padB = parseFloat(cs.paddingBottom) || 0;
+    this._metrics = {
+      pageW: content.clientWidth - padL - padR,
+      pageH: content.clientHeight - padT - padB,
+    };
+  }
+
+  _pagerFor() {
+    const s = this.settings;
+    return new ChapterPager({
+      pageW: Math.max(200, this._metrics.pageW),
+      pageH: Math.max(200, this._metrics.pageH),
+      vPad: 20,
+      fontSize: s.fontSize,
+      lineHeight: s.lineHeight,
+      fontFamily: s.fontFamily,
+      breaker: this.breaker,
+    });
+  }
+
+  async _ensurePages(chapterIndex) {
+    if (this._pagesCache.has(chapterIndex)) return this._pagesCache.get(chapterIndex);
+    const chapter = this.chapters[chapterIndex];
+    const result = await this._pagerFor().paginate(chapter.paras);
+    this._pagesCache.set(chapterIndex, result);
+    // 只保留最近 3 章的分页缓存，防止内存膨胀
+    if (this._pagesCache.size > 3) {
+      for (const key of this._pagesCache.keys()) {
+        if (key !== this.chapterIndex && key !== this.chapterIndex + 1 && key !== this.chapterIndex - 1) {
+          this._pagesCache.delete(key);
+        }
+      }
+    }
+    return result;
+  }
+
+  _prefixChars(chapterIndex) {
+    let n = 0;
+    const chars = this.book.chapterChars || [];
+    for (let i = 0; i < chapterIndex && i < chars.length; i++) n += chars[i] || 0;
+    return n;
+  }
+  get _totalChars() { return this.book.totalChars || this.book.chapterChars.reduce((n, c) => n + c, 0) || 1; }
+
+  /* ---------- 导航 ---------- */
+  async gotoChapter(index, pageIndex = 0, charOffsetInChapter = -1) {
+    if (!this.chapters || !this.chapters.length) return;
+    index = clampNum(index, 0, this.chapters.length - 1);
+    this.chapterIndex = index;
+    this.el.title.textContent = this.book.title + ' · ' + (this.chapters[index].title || '');
+    const { pages } = await this._ensurePages(index);
+    let target = 0;
+    if (pageIndex >= 0 && pageIndex < pages.length) {
+      target = pageIndex;
+    } else if (charOffsetInChapter >= 0 && pages.length > 1) {
+      target = this._pageForCharOffset(pages, charOffsetInChapter);
+    }
+    this.pageIndex = target;
+    this._render();
+    this._afterNav();
+  }
+
+  _pageForCharOffset(pages, offset) {
+    let best = 0;
+    for (let i = 0; i < pages.length; i++) {
+      if (pages[i].startChar <= offset) best = i; else break;
+    }
+    return best;
+  }
+
+  async nextPage() {
+    if (!this.book) return;
+    const { pages } = await this._ensurePages(this.chapterIndex);
+    if (this.pageIndex < pages.length - 1) { this.pageIndex++; this._render(); this._afterNav(); }
+    else if (this.chapterIndex < this.chapters.length - 1) { await this.gotoChapter(this.chapterIndex + 1, 0); }
+    else { toast(I18N.t('lastPage')); }
+  }
+  async prevPage() {
+    if (!this.book) return;
+    if (this.pageIndex > 0) { this.pageIndex--; this._render(); this._afterNav(); }
+    else if (this.chapterIndex > 0) {
+      const { pages } = await this._ensurePages(this.chapterIndex - 1);
+      await this.gotoChapter(this.chapterIndex - 1, pages.length - 1);
+    } else { toast(I18N.t('firstPage')); }
+  }
+  async nextChapter() {
+    if (this.chapterIndex < this.chapters.length - 1) await this.gotoChapter(this.chapterIndex + 1, 0);
+    else toast(I18N.t('lastChapter'));
+  }
+  async prevChapter() {
+    if (this.chapterIndex > 0) await this.gotoChapter(this.chapterIndex - 1, 0);
+    else toast(I18N.t('firstChapter'));
+  }
+
+  /* 按全书百分比跳转（0~1） */
+  async gotoPercent(p) {
+    const chars = this.book.chapterChars || [];
+    let target = Math.round(p * this._totalChars);
+    let ci = 0;
+    for (let i = 0; i < chars.length; i++) {
+      if (target <= chars[i]) { ci = i; break; }
+      target -= chars[i];
+      ci = i + 1;
+    }
+    ci = clampNum(ci, 0, this.chapters.length - 1);
+    await this.gotoChapter(ci, -1, target);
+  }
+
+  /* ---------- 渲染 ---------- */
+  _render() {
+    const chapter = this.chapters[this.chapterIndex];
+    if (!chapter) return;
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+    const page = pages[this.pageIndex] || pages[0];
+    const root = this.el.content;
+    root.textContent = '';
+    if (!page) return;
+    const frag = document.createDocumentFragment();
+    let cur = null;
+    for (let li = 0; li < page.lines.length; li++) {
+      const ln = page.lines[li];
+      const text = chapter.paras[ln.p].slice(ln.s, ln.e);
+      if (!cur || cur.p !== ln.p) {
+        cur = { p: ln.p };
+        const el = document.createElement('p');
+        el.className = 'para';
+        el.dataset.p = ln.p; el.dataset.s = ln.s; el.dataset.e = ln.e;
+        el.textContent = text;
+        frag.appendChild(el);
+      } else {
+        const el = frag.lastElementChild;
+        el.dataset.e = ln.e;
+        el.textContent += text;
+      }
+    }
+    root.appendChild(frag);
+    // 中间过渡段落（跨页段落在上/下页有接续）给出更紧凑间距
+    this._tightenBoundaryParas(page);
+  }
+
+  /** 跨页段落首行/末行排版微调（可读性） */
+  _tightenBoundaryParas(page) {
+    const els = this.el.content.querySelectorAll('.para');
+    for (const el of els) {
+      const p = +el.dataset.p;
+      const len = this.chapters[this.chapterIndex].paras[p].length;
+      const fullStart = +el.dataset.s === 0;
+      const fullEnd = +el.dataset.e >= len;
+      if (!fullStart || !fullEnd) el.classList.add('tight');
+    }
+  }
+
+  _currentBookPercent() {
+    const prefix = this._prefixChars(this.chapterIndex);
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [{ startChar: 0 }] };
+    const page = pages[this.pageIndex] || pages[0];
+    return clampNum((prefix + page.startChar) / Math.max(1, this._totalChars), 0, 1);
+  }
+
+  _afterNav() {
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+    this.el.pageLabel.textContent = `${this.pageIndex + 1} / ${pages.length || 1}`;
+    const p = this._currentBookPercent();
+    this.el.percent.textContent = Math.round(p * 100) + '%';
+    this.bus.emit('reader:page', {
+      bookId: this.book.id,
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      percent: p,
+      title: this.chapters[this.chapterIndex].title,
+    });
+    this.savePos();
+  }
+
+  _persistPosition() {
+    if (!this.book) return;
+    const prefix = this._prefixChars(this.chapterIndex);
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [{ startChar: 0 }] };
+    const page = pages[this.pageIndex] || pages[0];
+    const percent = this._currentBookPercent();
+    this.data.savePosition({
+      bookId: this.book.id,
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      percent,
+      charOffset: prefix + page.startChar,
+    });
+  }
+
+  /* ---------- 设置应用 ---------- */
+  applySettings(settings) {
+    this.settings = settings;
+    const content = this.el.content;
+    content.style.setProperty('--font-size', settings.fontSize + 'px');
+    content.style.setProperty('--reader-line-height', settings.lineHeight);
+    content.style.fontFamily =
+      settings.fontFamily === 'kai' ? '"KaiTi","STKaiti","Kaiti SC",serif' :
+      settings.fontFamily === 'sans' ? '"PingFang SC","Microsoft YaHei",sans-serif' :
+      '"Songti SC","Noto Serif CJK SC","SimSun",serif';
+    content.style.width = settings.pageWidth + '%';
+    content.classList.toggle('no-indent', !settings.indent);
+    this.hotZonesOn = !!settings.hitZone;
+    this.tts.setRate(settings.ttsRate);
+    this.tts.setVoice(settings.ttsVoice);
+    if (this.book && this._metrics) {
+      this._refreshMetrics();
+      // 重新分页并按字符偏移恢复位置
+      const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+      const page = pages[this.pageIndex] || pages[0];
+      const posOffset = page ? page.startChar : 0;
+      this._pagesCache.clear();
+      this.gotoChapter(this.chapterIndex, -1, posOffset);
+    }
+  }
+
+  /* ---------- 划词 ---------- */
+  /** 由 App 注入: (text, type /* 'translate'|'explain'|'speak'|'copy' *\/) => void */
+  onSelectionAction = null;
+
+  /* ---------- TTS 朗读 ---------- */
+  startReading() {
+    if (!this.settings) return;
+    if (!this.tts.supported) { toast(I18N.t('noTts'), true); return; }
+    this.stopReading();
+    this.reading = true;
+    this._syncTtsUI();
+    this._readCurrentPage();
+  }
+  stopReading() {
+    this.reading = false;
+    this.tts.stop();
+    this.el.content.querySelectorAll('.para-tts').forEach(el => el.classList.remove('para-tts'));
+    this._syncTtsUI();
+  }
+  _syncTtsUI() {
+    this.el.ttsPlay.textContent = this.reading ? '⏹' : '▶';
+    this.el.ttsStop.disabled = !this.reading;
+    this.bus.emit('tts:state', { reading: this.reading });
+  }
+
+  async _readCurrentPage() {
+    const chapter = this.chapters[this.chapterIndex];
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+    const page = pages[this.pageIndex];
+    if (!page) return this.stopReading();
+    // 合并本页段落（跨页段落只读本页部分）
+    const groups = [];
+    for (const ln of page.lines) {
+      const last = groups[groups.length - 1];
+      const text = chapter.paras[ln.p].slice(ln.s, ln.e);
+      if (last && last.p === ln.p) last.text += text;
+      else groups.push({ p: ln.p, text });
+    }
+    for (const g of groups) {
+      if (!this.reading) return;
+      const sentences = splitSentences(g.text);
+      for (const s of sentences) {
+        if (!this.reading) return;
+        await this._speakAndWait(s, g.p);
+      }
+    }
+    if (!this.reading) return;
+    if (this.pageIndex < pages.length - 1) {
+      this.pageIndex++;
+      this._render();
+      this._afterNav();
+      await this._readCurrentPage();
+    } else if (this.chapterIndex < this.chapters.length - 1) {
+      await this.gotoChapter(this.chapterIndex + 1, 0);
+      await this._readCurrentPage();
+    } else {
+      toast(I18N.t('bookFinished'));
+      this.stopReading();
+    }
+  }
+  _speakAndWait(text, paraIndex) {
+    return new Promise(resolve => {
+      this.tts.enqueue(text, {
+        onstart: () => {
+          this.el.content.querySelectorAll('.para-tts').forEach(el => el.classList.remove('para-tts'));
+          const el = this.el.content.querySelector(`.para[data-p="${paraIndex}"]`);
+          if (el) el.classList.add('para-tts');
+          this.bus.emit('tts:state', { reading: true, paraIndex });
+        },
+        onend: resolve,
+      });
+    });
+  }
+
+  /* ---------- UI 事件 ---------- */
+  _bindUI() {
+    this.el.btnPrev.onclick = () => this.prevPage();
+    this.el.btnNext.onclick = () => this.nextPage();
+    this.el.chapPrev.onclick = () => this.prevChapter();
+    this.el.chapNext.onclick = () => this.nextChapter();
+    this.el.toc.onclick = () => this.bus.emit('reader:toc-open');
+    this.el.ttsPlay.onclick = () => { this.reading ? this.stopReading() : this.startReading(); };
+    this.el.ttsStop.onclick = () => this.stopReading();
+    // 全局键盘翻页（输入框/弹窗打开时不劫持按键）
+    window.addEventListener('keydown', e => this._onKey(e));
+
+    // 热区点击翻页
+    $('#hz-left').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.prevPage(); };
+    $('#hz-right').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.nextPage(); };
+
+    // 触摸滑动
+    let tx = 0, ty = 0;
+    $('#page-frame').addEventListener('touchstart', e => {
+      const t = e.touches[0]; tx = t.clientX; ty = t.clientY;
+    }, { passive: true });
+    $('#page-frame').addEventListener('touchend', e => {
+      const t = e.changedTouches[0];
+      const dx = t.clientX - tx, dy = t.clientY - ty;
+      if (Math.abs(dx) > 56 && Math.abs(dx) > Math.abs(dy) * 1.4 && !this._hasSelection()) {
+        dx < 0 ? this.nextPage() : this.prevPage();
+      }
+    }, { passive: true });
+
+    // 划词弹层
+    this.el.content.addEventListener('mouseup', e => this._maybeShowSelection(e));
+    this.el.content.addEventListener('touchend', e => setTimeout(() => this._maybeShowSelection(e), 120), { passive: true });
+    document.addEventListener('mousedown', e => {
+      if (!$('#sel-popup').contains(e.target)) this._hideSelection();
+    });
+
+    window.addEventListener('resize', debounce(() => {
+      if (this.book) this.applySettings(this.settings);
+    }, 280));
+  }
+  _hasSelection() { const s = window.getSelection(); return s && s.toString().trim().length > 0; }
+  _onKey(e) {
+    if (!this.book) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    // 有弹窗打开时不翻页
+    for (const m of document.querySelectorAll('.modal-backdrop')) {
+      if (m.style.display !== 'none') return;
+    }
+    const k = e.key;
+    if (k === 'ArrowRight' || k === 'PageDown' || k === ' ') { e.preventDefault(); this.nextPage(); }
+    else if (k === 'ArrowLeft' || k === 'PageUp') { e.preventDefault(); this.prevPage(); }
+    else if (k === 'Home') { e.preventDefault(); this.gotoChapter(this.chapterIndex, 0); }
+    else if (k === 'End') { e.preventDefault(); this.gotoChapter(this.chapterIndex, 1e9); }
+  }
+  _maybeShowSelection(e) {
+    const sel = window.getSelection();
+    if (!sel) return;
+    const text = sel.toString().trim();
+    const anchor = sel.anchorNode;
+    if (text.length === 0 || text.length > 500) return this._hideSelection();
+    if (anchor && this.el.content.contains(anchor)) {
+      const action = (this.settings && this.settings.selAction) || 'popup';
+      if (action === 'auto') {
+        if (this.onSelectionAction) this.onSelectionAction(text, 'translate', true);
+        return;
+      }
+      const popup = $('#sel-popup');
+      popup.innerHTML = '';
+      const mk = (label, type) => {
+        const b = document.createElement('button');
+        b.className = 'sp-btn'; b.textContent = label;
+        b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); this._hideSelection(); if (this.onSelectionAction) this.onSelectionAction(text, type); };
+        popup.appendChild(b);
+      };
+      mk(I18N.t('selTranslate'), 'translate');
+      mk(I18N.t('selExplain'), 'explain');
+      mk(I18N.t('selSpeak'), 'speak');
+      const sep = document.createElement('span'); sep.className = 'sp-sep'; popup.appendChild(sep);
+      mk(I18N.t('selCopy'), 'copy');
+      const x = e.clientX || (this.el.content.clientWidth / 2), y = e.clientY || 100;
+      popup.style.left = x + 'px';
+      popup.style.top = y + 'px';
+      popup.classList.add('show');
+    } else {
+      this._hideSelection();
+    }
+  }
+  _hideSelection() {
+    $('#sel-popup').classList.remove('show');
+    if (typeof window.getSelection === 'function') {
+      try { /* 保留选区，仅隐藏弹层 */ } catch (e) { /* noop */ }
+    }
+  }
+}
+
+/** 把长文本切分为句子（用于朗读队列） */
+function splitSentences(text) {
+  const out = [];
+  let cur = '';
+  for (const ch of text) {
+    cur += ch;
+    if ('。！？!?；;…\n'.includes(ch) || cur.length >= 60) { out.push(cur); cur = ''; }
+  }
+  if (cur.trim()) out.push(cur);
+  if (!out.length && text) out.push(text);
+  return out;
+}

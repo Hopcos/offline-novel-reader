@@ -1,0 +1,5738 @@
+
+'use strict';
+/* ============================================================================
+   离线小说阅读器 — 应用脚本（单文件模块化）
+   架构分层（自底向上）:
+     utils           通用工具 / EventBus(观察者)
+     storage         StorageAdapter 接口 + IndexedDB / localStorage 两套实现（存储层）
+     worker          Web Worker 线程池（多线程章节切分）
+     data            DataManager（数据仓库: 书籍/章节/进度 CRUD）
+     dict            词典服务（策略模式: 多词典可切换）
+     tts             语音朗读服务（浏览器原生 SpeechSynthesis）
+     reader          LineBreaker + Pager 分页排版引擎 + Reader 阅读控制器
+     backup          备份导出 / 导入（迁移）
+     app             App 门面（Facade）：组装以上模块 + 绑定 UI 事件
+   ========================================================================== */
+
+/* ---------- 0. 工具函数 utils ---------- */
+const $  = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function debounce(fn, ms) {
+  let t = 0;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/** 数字简写（跟随界面语言：中文 万/亿，英文 K/M） */
+function fmtNum(n) { return I18N.fmt(n); }
+
+function nowStamp() { return new Date().toISOString(); }
+
+/** 稳定性好的字符串 FNV-1a 哈希（用于生成书籍 ID，可复现，用于去重检测） */
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+/* ---------- Toast 通知 ---------- */
+function toast(msg, isErr = false, ms = 2600) {
+  const box = document.createElement('div');
+  box.className = 'toast' + (isErr ? ' err' : '');
+  box.textContent = msg;
+  $('#toasts').appendChild(box);
+  setTimeout(() => box.remove(), ms);
+}
+
+/** 通用确认框 → Promise<boolean> */
+function confirmDialog({ title = I18N.t('cfTitle'), message = '', okText = I18N.t('ok'), danger = false }) {
+  return new Promise(resolve => {
+    $('#cf-title').textContent = title;
+    $('#cf-message').innerHTML = message;
+    const ok = $('#cf-ok');
+    ok.textContent = okText;
+    ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+    const close = val => {
+      $('#dlg-confirm').style.display = 'none';
+      ok.onclick = null; $('#cf-cancel').onclick = null;
+      $('#dlg-confirm').querySelectorAll('[data-close]').forEach(b => b.onclick = null);
+      resolve(val);
+    };
+    ok.onclick = () => close(true);
+    $('#cf-cancel').onclick = () => close(false);
+    $('#dlg-confirm').querySelectorAll('[data-close]').forEach(b => b.onclick = () => close(false));
+    $('#dlg-confirm').style.display = 'flex';
+  });
+}
+
+/** 进度覆盖层：show 返回 {set(v), setSub(s), done()} */
+function progressUI() {
+  const wrap = $('#progress-overlay');
+  const fill = $('#prog-fill'), pct = $('#prog-pct'), sub = $('#prog-sub'), title = $('#prog-title');
+  return {
+    show(t) {
+      title.textContent = t; fill.style.width = '0%'; pct.textContent = '0%';
+      sub.textContent = ''; wrap.classList.add('show');
+    },
+    set(v) {
+      const p = Math.max(0, Math.min(100, Math.round(v * 100)));
+      fill.style.width = p + '%'; pct.textContent = p + '%';
+    },
+    setSub(s) { sub.textContent = s; },
+    done() { wrap.classList.remove('show'); },
+  };
+}
+
+/** 弹窗开关通用绑定 */
+function bindModal(modal, openBtn) {
+  if (openBtn) openBtn.onclick = () => { modal.style.display = 'flex'; };
+  modal.querySelectorAll('[data-close]').forEach(b => {
+    b.onclick = () => { modal.style.display = 'none'; };
+  });
+  modal.addEventListener('mousedown', e => {
+    if (e.target === modal) modal.style.display = 'none';
+  });
+}
+
+/* ---------- 0.5 国际化 I18n（中 / EN 界面切换，由 App 门面驱动） ----------
+ *  用法: I18N.t(key, {param}) 取当前语言文案，{param} 做占位替换；
+ *  I18N.applyStatic() 把 [data-i18n] / [data-i18n-ph] / [data-i18n-title] / [data-i18n-html]
+ *  的静态文案一次性应用到 DOM（切换语言后重跑即可）。 */
+const I18N_LANGS = {
+  zh: {
+    // 通用 / 标题
+    appTitle: '离线小说阅读器',
+    appName: '离线小说阅读器',
+    untitled: '未命名小说',
+    bookCover: '书',
+    cancel: '取消',
+    ok: '确定',
+    // 顶栏
+    btnImport: '⬆ 导入小说',
+    btnExport: '⇩ 导出备份',
+    btnImpBack: '⇧ 导入备份',
+    impTitle: '导入 .txt / .md 小说文件（可多选）',
+    pasteTitle: '粘贴文本导入',
+    exportTitle: '导出全部书籍与阅读进度为备份文件',
+    impBackTitle: '从备份文件恢复书籍与阅读进度',
+    settingsTitle: '阅读设置',
+    helpTitle: '帮助',
+    langSwitch: '切换界面语言（中 / EN）',
+    // 侧栏
+    searchPh: '搜索书名 / 作者…',
+    dbInit: '数据库…',
+    workerInit: '线程:—',
+    stDbIdb: 'IndexedDB 已连接',
+    stDbLs: '兼容存储(localStorage)',
+    workerReady: '后台就绪',
+    workerMain: '主线程',
+    stWorker: '线程: {m}',
+    // 空状态欢迎页
+    welcomeHtml: '<b>欢迎使用离线小说阅读器</b>',
+    emptyHintHtml: '点击「<b>导入小说</b>」选择 <b>.txt / .md</b> 文件开始阅读（自动识别 UTF-8 / GBK 编码）。',
+    emptyMigrateHtml: '换设备时：旧设备点「<b>导出备份</b>」，新设备打开本页后点「<b>导入备份</b>」即可恢复全部书籍与阅读位置。',
+    emptyOfflineHtml: '完全离线运行：书籍、进度、词典全部保存在浏览器本地（IndexedDB）。',
+    // 阅读工具栏
+    tocTitle: '目录',
+    chapPrevTitle: '上一章',
+    chapNextTitle: '下一章',
+    ttsPlayTitle: '从当前页开始朗读',
+    ttsStopTitle: '停止朗读',
+    ttsRateTitle: '朗读语速',
+    ttsVoiceTitle: '发音人',
+    pagePrevTitle: '上一页 (←)',
+    pageNextTitle: '下一页 (→)',
+    percentTitle: '全书进度',
+    hzPageTitle: '翻页（点击）',
+    noBook: '未打开书籍',
+    stHint: '划选正文 → 翻译 / 解释 / 朗读 · 键盘 ← → 翻页',
+    stReading: '🔊 朗读中…',
+    lastPage: '已是最后一页',
+    firstPage: '已是第一页',
+    lastChapter: '已是最后一章',
+    firstChapter: '已是第一章',
+    // 词典面板
+    dictTitle: '📚 词典 · 翻译 / 解释',
+    dictInputPh: '输入或划选文字，回车查询…',
+    dictGo: '查询',
+    dictNeedQuery: '请输入要查询的文字',
+    dictEmptyHtml: '在正文中划选文字，或在上方输入查询。<br>词典数据完全离线打包在本页面中。',
+    d_en2cn: '英译中', d_hint_en2cn: '英语单词/短语 → 中文释义',
+    d_cn2en: '中译英', d_hint_cn2en: '中文常用词 → 英语释义',
+    d_idioms: '成语', d_hint_idioms: '四字成语 / 惯用语释义',
+    d_chars: '汉字', d_hint_chars: '常见汉字 → 简明释义',
+    dictLineGloss: '整句逐词释义',
+    dictEnEmpty: '当前查询不是英文，请在「中译英」中查看。',
+    dictEnTitle: '英 → 中（词典命中 {hit}/{total} 词）',
+    dictUnknown: '未收录词',
+    dictCnEmpty: '当前查询不是中文，请在「英译中」中查看。',
+    dictCnTitle: '中 → 英（分词命中 {hit}/{total} 词）',
+    dictNoIdiom: '未找到成语/惯用语。',
+    dictIdiomTitle: '成语 / 惯用语（命中 {n} 条）',
+    tagIdiom: '成语',
+    charsCnOnly: '汉字详解仅支持中文。',
+    charsTitle: '逐字详解（{hit}/{total} 字已收录）',
+    tagChar: '汉字',
+    charsMissing: '未收录字',
+    explainIdiom: '成语',
+    explainWords: '词语解析',
+    explainChars: '逐字详解',
+    explainUnknown: '未收录汉字',
+    explainHeader: '📖 中文解释',
+    explainCnOnly: '解释功能仅针对中文文本（英文请用「翻译」）',
+    // 划词
+    selTranslate: '翻译',
+    selExplain: '解释',
+    selSpeak: '朗读',
+    selCopy: '复制',
+    copied: '已复制',
+    copyPrompt: '复制文本：',
+    noTts: '当前浏览器不支持语音合成(SpeechSynthesis)',
+    speakingSel: '正在朗读选中文字…',
+    bookFinished: '全书朗读完成',
+    // 粘贴导入
+    pasteTitleH: '粘贴导入小说',
+    pasteName: '书名',
+    pasteNamePh: '必填',
+    pasteBody: '正文（可粘贴大段文本，自动切分章节）',
+    pasteTextPh: '把小说内容粘贴到这里…',
+    pasteOk: '导入',
+    pasteSource: '粘贴导入',
+    needTitle: '请填写书名',
+    needText: '正文不能为空',
+    // 设置
+    setTitle: '⚙ 阅读设置',
+    setTheme: '主题', setFontSize: '字号', setLineHeight: '行距', setFont: '字体',
+    setPageWidth: '页宽',
+    setHitZone: '点击页面左右两侧边翻页',
+    setIndent: '段落首行缩进两字符',
+    setSelAction: '划词操作',
+    setSelPopup: '弹出工具栏（翻译 / 解释 / 朗读）',
+    setSelAuto: '划词后自动打开词典翻译',
+    setNote: '设置与阅读进度会自动保存到浏览器数据库；「导出备份」会包含全部书籍内容、进度与自定义词条。',
+    doneBtn: '完成',
+    theme_light: '浅色', theme_sepia: '羊皮纸', theme_dark: '深色', theme_green: '护眼绿',
+    font_serif: '宋体系 (衬线)', font_kai: '楷体系', font_sans: '黑体系 (无衬线)',
+    // 帮助
+    helpHtml: '<h4>快速上手</h4>' +
+      '<p>「导入小说」选择本地 .txt / .md 文件（支持多选、UTF-8 与 GBK 编码）；也可以「粘贴导入」。</p>' +
+      '<p>书籍与阅读位置保存在浏览器 IndexedDB 中，自动持久化，刷新不丢失。</p>' +
+      '<h4>换设备迁移</h4>' +
+      '<p>旧设备：<b>导出备份</b> → 得到 backup.json；新设备：打开本页面 → <b>导入备份</b> → 全部书籍 + 进度恢复。</p>' +
+      '<h4>划词 · 翻译 · 解释</h4>' +
+      '<p>在正文中划选文字，弹出工具栏：<b>翻译</b>（英↔中，右侧词典面板）、<b>解释</b>（中文词义 / 成语 / 逐字详解）、<b>朗读</b>（朗读选中片段）。全部离线完成。</p>' +
+      '<h4>朗读</h4>' +
+      '<p>使用浏览器原生语音合成；点击 ▶ 从当前页连续朗读，朗读到页尾自动翻页；可调节语速与发音人。</p>' +
+      '<h4>快捷键与手势</h4>' +
+      '<div class="key-row"><span><kbd>←</kbd> / <kbd>→</kbd> 或 <kbd>PageUp</kbd> / <kbd>PageDown</kbd></span><span>上一页 / 下一页</span></div>' +
+      '<div class="key-row"><span><kbd>Home</kbd> / <kbd>End</kbd></span><span>章首 / 章末</span></div>' +
+      '<div class="key-row"><span>移动端：左右滑动</span><span>翻页</span></div>' +
+      '<div class="key-row"><span>「☰」按钮</span><span>打开 / 收起书库</span></div>' +
+      '<div class="key-row"><span>长按 / 划选文字</span><span>翻译、解释、朗读</span></div>' +
+      '<h4>性能说明</h4>' +
+      '<p>章节切分在后台 Web Worker 线程异步执行（多线程），主界面不卡顿；分页排版采用测量分页，翻页流畅。</p>',
+    // 确认框 / 进度
+    cfTitle: '确认',
+    progDefault: '处理中…',
+    // 书库
+    metaChap: '{n} 章', metaChars: '{n} 字',
+    metaRead: '读到 {p}%', metaUnread: '未开始',
+    delBookTitle: '删除这本书',
+    listEmptySearch: '没有匹配的书籍',
+    listEmptyHtml: '书库为空<br>点击右上角「导入小说」开始',
+    deleteTitle: '删除书籍',
+    deleteMsgHtml: '确定删除《{title}》？<br><span class="muted-text">章节内容与阅读进度将一并删除，且无法撤销。</span>',
+    deleteOk: '删除',
+    deletedMsg: '已删除《{title}》',
+    bookMissing: '书籍不存在',
+    timeAgoJust: '刚刚',
+    timeAgoMin: '{n} 分钟前',
+    timeAgoHour: '{n} 小时前',
+    timeAgoDay: '{n} 天前',
+    // 导入
+    noTxtFiles: '请选择 .txt 或 .md 文本文件',
+    importing: '正在导入 ({a}/{b})',
+    importFail: '导入「{name}」失败: {msg}',
+    dupTitle: '检测到重复书籍',
+    dupMsgHtml: '《{title}》已存在于书库（内容相同）。<br>重新导入将<b>更新章节内容并重置阅读进度</b>。是否继续？',
+    dupOk: '重新导入',
+    reimported: '已重新导入《{title}》',
+    imported: '导入成功：《{title}》',
+    // 数据层
+    progSplit: '正在切分章节…',
+    progWorker: '后台线程处理中',
+    progOrganize: '整理章节…',
+    progWrite: '正在写入数据库…',
+    workerErr: 'Worker 异常: {msg}',
+    // 自定义词条
+    customTitleHtml: '自定义词条 <span class="muted-text" style="font-weight:400">（查询时优先命中）</span>',
+    cdWordPh: '词 / 短语', cdGlossPh: '释义',
+    cdAdd: '添加', cdDel: '删除',
+    cdEmpty: '还没有自定义词条，例如给网络小说里的专有名词加注释。',
+    cdFill: '请填写词条与释义',
+    cdAdded: '已添加词条',
+    // 备份
+    progCollect: '正在收集数据…',
+    progReadDb: '读取数据库',
+    progPackJson: '正在打包 JSON',
+    progOverwrite: '正在覆盖导入…',
+    progMerge: '正在合并导入…',
+    progBooks: '共 {n} 本书',
+    errBackupJson: '备份文件不是有效的 JSON',
+    errBackupSchema: '不是本阅读器生成的备份文件（schema 不匹配）',
+    exportedMsg: '已导出备份 {name}<br>{books} 本书 · {chapters} 章 · 共 {chars} 字',
+    exportFail: '导出备份失败: {msg}',
+    importTitle: '导入备份',
+    bkFileHtml: '备份文件：<b>{name}</b><br>',
+    bkTimeHtml: '导出时间：{t}<br>',
+    bkContainsHtml: '包含：<b>{books}</b> 本书、<b>{chapters}</b> 章、<b>{positions}</b> 条阅读进度<br><br>',
+    bkCharsHtml: '总字数约 <b>{chars}</b><br><br>',
+    bkMergeHtml: '<b>合并</b>：保留当前设备已有书籍，仅添加备份中不重复的内容与进度。<br>',
+    bkOverwriteHtml: '<b>覆盖</b>：清空当前设备全部数据，完整恢复备份内容（推荐在新设备上使用）。',
+    mergeOk: '合并导入',
+    overwriteExtra: '覆盖导入（清空现有数据）',
+    confirmOverwriteTitle: '确认覆盖',
+    confirmOverwriteMsgHtml: '覆盖将<b>清空当前设备上所有书籍、进度与设置</b>，并恢复为备份中的内容。确定继续吗？',
+    confirmOverwriteOk: '确认覆盖',
+    importDone: '导入完成：新增 {books} 本 · {chapters} 章 · {positions} 条进度 · 跳过 {skipped} 项',
+    importFail: '导入备份失败: {msg}',
+    // 存储 / 异常
+    noStorage: '浏览器无可用存储（IndexedDB/localStorage 均不可用），无法使用本应用',
+    storageFull: 'localStorage 容量不足：{msg}（建议改用支持 IndexedDB 的浏览器）',
+    runtimeError: '运行错误',
+    errToast: '发生错误: {msg}',
+    initFail: '初始化失败: {msg}',
+    defaultVoice: '默认发音人',
+  },
+  en: {
+    appTitle: 'Offline Novel Reader',
+    appName: 'Offline Novel Reader',
+    untitled: 'Untitled novel',
+    bookCover: 'Book',
+    cancel: 'Cancel',
+    ok: 'OK',
+    btnImport: '⬆ Import',
+    btnExport: '⇩ Export backup',
+    btnImpBack: '⇧ Import backup',
+    impTitle: 'Import .txt / .md novel files (multi-select)',
+    pasteTitle: 'Paste text to import',
+    exportTitle: 'Export all books & reading progress as a backup file',
+    impBackTitle: 'Restore books & progress from a backup file',
+    settingsTitle: 'Reader settings',
+    helpTitle: 'Help',
+    langSwitch: 'Switch UI language (English / 中文)',
+    searchPh: 'Search title / author…',
+    dbInit: 'Database…',
+    workerInit: 'Thread:—',
+    stDbIdb: 'IndexedDB connected',
+    stDbLs: 'Fallback storage (localStorage)',
+    workerReady: 'worker ready',
+    workerMain: 'main thread',
+    stWorker: 'Thread: {m}',
+    welcomeHtml: '<b>Welcome to the Offline Novel Reader</b>',
+    emptyHintHtml: 'Click <b>Import</b> and choose <b>.txt / .md</b> files to start reading (UTF-8 / GBK auto-detected).',
+    emptyMigrateHtml: 'Moving devices: click <b>Export backup</b> on the old device, then open this page on the new one and click <b>Import backup</b> to restore everything.',
+    emptyOfflineHtml: 'Fully offline: books, progress and dictionaries all live in your browser (IndexedDB).',
+    tocTitle: 'Table of contents',
+    chapPrevTitle: 'Previous chapter',
+    chapNextTitle: 'Next chapter',
+    ttsPlayTitle: 'Read aloud from this page',
+    ttsStopTitle: 'Stop reading',
+    ttsRateTitle: 'Reading speed',
+    ttsVoiceTitle: 'Voice',
+    pagePrevTitle: 'Previous page (←)',
+    pageNextTitle: 'Next page (→)',
+    percentTitle: 'Whole-book progress',
+    hzPageTitle: 'Turn page (tap)',
+    noBook: 'No book open',
+    stHint: 'Select text → translate / explain / speak · ← → keys turn pages',
+    stReading: '🔊 Reading…',
+    lastPage: 'This is the last page',
+    firstPage: 'This is the first page',
+    lastChapter: 'This is the last chapter',
+    firstChapter: 'This is the first chapter',
+    dictTitle: '📚 Dictionary · Translate / Explain',
+    dictInputPh: 'Type or select text, press Enter…',
+    dictGo: 'Look up',
+    dictNeedQuery: 'Please enter text to look up',
+    dictEmptyHtml: 'Select text in the reader, or type a query above.<br>All dictionary data is bundled offline in this page.',
+    d_en2cn: 'EN→CN', d_hint_en2cn: 'English words / phrases → Chinese',
+    d_cn2en: 'CN→EN', d_hint_cn2en: 'Chinese words → English',
+    d_idioms: 'Idioms', d_hint_idioms: '4-character idioms & set phrases',
+    d_chars: 'Hanzi', d_hint_chars: 'Common Chinese characters, plain meanings',
+    dictLineGloss: 'Word-by-word gloss',
+    dictEnEmpty: 'This query is not English — see the CN→EN tab.',
+    dictEnTitle: 'EN → CN ({hit}/{total} words found)',
+    dictUnknown: 'Unknown words',
+    dictCnEmpty: 'This query is not Chinese — see the EN→CN tab.',
+    dictCnTitle: 'CN → EN ({hit}/{total} tokens found)',
+    dictNoIdiom: 'No idioms found.',
+    dictIdiomTitle: 'Idioms / set phrases ({n} found)',
+    tagIdiom: 'idiom',
+    charsCnOnly: 'Chinese-only: character lookup works for Chinese text.',
+    charsTitle: 'Per-character detail ({hit}/{total} chars covered)',
+    tagChar: 'char',
+    charsMissing: 'Chars not covered',
+    explainIdiom: 'Idiom',
+    explainWords: 'Word breakdown',
+    explainChars: 'Per-character',
+    explainUnknown: 'Chars not covered',
+    explainHeader: '📖 Chinese explanation',
+    explainCnOnly: 'Explain works for Chinese text (use Translate for English)',
+    selTranslate: 'Translate',
+    selExplain: 'Explain',
+    selSpeak: 'Speak',
+    selCopy: 'Copy',
+    copied: 'Copied',
+    copyPrompt: 'Copy text: ',
+    noTts: 'Speech synthesis is not supported in this browser',
+    speakingSel: 'Reading selected text…',
+    bookFinished: 'Finished reading the book',
+    pasteTitleH: 'Paste-import a novel',
+    pasteName: 'Title',
+    pasteNamePh: 'required',
+    pasteBody: 'Body (paste freely; chapters are split automatically)',
+    pasteTextPh: 'Paste the novel text here…',
+    pasteOk: 'Import',
+    pasteSource: 'Pasted text',
+    needTitle: 'Please enter a title',
+    needText: 'The text must not be empty',
+    setTitle: '⚙ Reader settings',
+    setTheme: 'Theme', setFontSize: 'Font size', setLineHeight: 'Line height', setFont: 'Font',
+    setPageWidth: 'Page width',
+    setHitZone: 'Tap left/right edges of the page to turn pages',
+    setIndent: 'Indent the first line of each paragraph',
+    setSelAction: 'Selection action',
+    setSelPopup: 'Show toolbar (translate / explain / speak)',
+    setSelAuto: 'Auto-open dictionary on selection',
+    setNote: 'Settings & progress are saved to the browser database automatically; "Export backup" includes all books, progress and custom entries.',
+    doneBtn: 'Done',
+    theme_light: 'Light', theme_sepia: 'Sepia', theme_dark: 'Dark', theme_green: 'Green',
+    font_serif: 'Serif (song)', font_kai: 'Kai', font_sans: 'Sans (hei)',
+    helpHtml: '<h4>Quick start</h4>' +
+      '<p>Click <b>Import</b> and pick local .txt / .md files (multi-select, UTF-8 & GBK supported); you can also <b>paste text</b>.</p>' +
+      '<p>Books and reading positions are stored in the browser IndexedDB automatically and survive refreshes.</p>' +
+      '<h4>Moving devices</h4>' +
+      '<p>Old device: <b>Export backup</b> → get backup.json; new device: open this page → <b>Import backup</b> → all books + progress restored.</p>' +
+      '<h4>Select · translate · explain</h4>' +
+      '<p>Select any text in the reader and a toolbar offers <b>Translate</b> (EN↔CN, dictionary panel on the right), <b>Explain</b> (word meanings / idioms / per-character), and <b>Speak</b>. All offline.</p>' +
+      '<h4>Text-to-speech</h4>' +
+      '<p>Uses the browser native speech synthesis; click ▶ to read continuously from the current page with automatic page turns; adjust speed and voice.</p>' +
+      '<h4>Shortcuts & gestures</h4>' +
+      '<div class="key-row"><span><kbd>←</kbd> / <kbd>→</kbd> or <kbd>PageUp</kbd> / <kbd>PageDown</kbd></span><span>Previous / next page</span></div>' +
+      '<div class="key-row"><span><kbd>Home</kbd> / <kbd>End</kbd></span><span>Chapter start / end</span></div>' +
+      '<div class="key-row"><span>Mobile: swipe left / right</span><span>Turn pages</span></div>' +
+      '<div class="key-row"><span>«☰» button</span><span>Open / close the library</span></div>' +
+      '<div class="key-row"><span>Select text</span><span>Translate, explain, speak</span></div>' +
+      '<h4>Performance</h4>' +
+      '<p>Chapter splitting runs asynchronously on a background Web Worker thread (multithreading), so the UI stays smooth; pagination is measured for fluid page turns.</p>',
+    cfTitle: 'Confirm',
+    progDefault: 'Working…',
+    metaChap: '{n} ch', metaChars: '{n} chars',
+    metaRead: 'Read {p}%', metaUnread: 'Not started',
+    delBookTitle: 'Delete this book',
+    listEmptySearch: 'No matching books',
+    listEmptyHtml: 'The library is empty<br>Click "Import" in the top-right to start',
+    deleteTitle: 'Delete book',
+    deleteMsgHtml: 'Delete "{title}"?<br><span class="muted-text">Chapters and progress will be removed permanently. This cannot be undone.</span>',
+    deleteOk: 'Delete',
+    deletedMsg: 'Deleted "{title}"',
+    bookMissing: 'Book not found',
+    timeAgoJust: 'just now',
+    timeAgoMin: '{n} min ago',
+    timeAgoHour: '{n} h ago',
+    timeAgoDay: '{n} d ago',
+    noTxtFiles: 'Please choose .txt or .md text files',
+    importing: 'Importing ({a}/{b})',
+    importFail: 'Failed to import "{name}": {msg}',
+    dupTitle: 'Duplicate book detected',
+    dupMsgHtml: '"{title}" is already in your library (identical content).<br>Re-importing will <b>update the chapters and reset reading progress</b>. Continue?',
+    dupOk: 'Re-import',
+    reimported: 'Re-imported "{title}"',
+    imported: 'Imported "{title}"',
+    progSplit: 'Splitting chapters…',
+    progWorker: 'Working in a background thread',
+    progOrganize: 'Organizing chapters…',
+    progWrite: 'Saving to database…',
+    workerErr: 'Worker error: {msg}',
+    customTitleHtml: 'Custom entries <span class="muted-text" style="font-weight:400">(matched first)</span>',
+    cdWordPh: 'word / phrase', cdGlossPh: 'definition',
+    cdAdd: 'Add', cdDel: 'Delete',
+    cdEmpty: 'No custom entries yet — e.g. add notes for proper nouns in web novels.',
+    cdFill: 'Please fill in word and definition',
+    cdAdded: 'Entry added',
+    progCollect: 'Collecting data…',
+    progReadDb: 'Reading database',
+    progPackJson: 'Packing JSON',
+    progOverwrite: 'Overwriting…',
+    progMerge: 'Merging…',
+    progBooks: '{n} books total',
+    errBackupJson: 'The backup file is not valid JSON',
+    errBackupSchema: 'Not a backup from this reader (schema mismatch)',
+    exportedMsg: 'Backup saved: {name}<br>{books} books · {chapters} chapters · {chars} chars total',
+    exportFail: 'Export failed: {msg}',
+    importTitle: 'Import backup',
+    bkFileHtml: 'File: <b>{name}</b><br>',
+    bkTimeHtml: 'Exported: {t}<br>',
+    bkContainsHtml: 'Contains: <b>{books}</b> books, <b>{chapters}</b> chapters, <b>{positions}</b> positions<br><br>',
+    bkCharsHtml: 'About <b>{chars}</b> chars total<br><br>',
+    bkMergeHtml: '<b>Merge</b>: keep this device\'s books; only add non-duplicate content & progress.<br>',
+    bkOverwriteHtml: '<b>Overwrite</b>: clear all local data and fully restore the backup (recommended on a new device).',
+    mergeOk: 'Merge import',
+    overwriteExtra: 'Overwrite (clear current data)',
+    confirmOverwriteTitle: 'Confirm overwrite',
+    confirmOverwriteMsgHtml: 'Overwriting will <b>clear all books, progress and settings</b> on this device and restore the backup content. Continue?',
+    confirmOverwriteOk: 'Overwrite',
+    importDone: 'Import done: {books} books · {chapters} chapters · {positions} positions · {skipped} skipped',
+    importFail: 'Import failed: {msg}',
+    noStorage: 'No usable storage in this browser (IndexedDB/localStorage unavailable) — the app cannot run',
+    storageFull: 'localStorage quota exceeded: {msg} (consider a browser with IndexedDB)',
+    runtimeError: 'Runtime error',
+    errToast: 'Error: {msg}',
+    initFail: 'Init failed: {msg}',
+    defaultVoice: 'Default voice',
+  },
+};
+
+const I18N = {
+  lang: 'zh',
+  /** 取当前语言文案；缺失时回退中文，再缺失返回 key 本身 */
+  t(key, params) {
+    const table = I18N_LANGS[this.lang] || I18N_LANGS.zh;
+    let s = table[key];
+    if (s === undefined) s = I18N_LANGS.zh[key] ?? key;
+    if (params) {
+      for (const k of Object.keys(params)) {
+        s = s.split('{' + k + '}').join(String(params[k]));
+      }
+    }
+    return s;
+  },
+  /** 数字简写：中文 万/亿，英文 K/M */
+  fmt(n) {
+    if (n == null || isNaN(n)) return '0';
+    const trimZero = s => (s.indexOf('.') >= 0 ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+    if (this.lang === 'en') {
+      if (n >= 1e6) return trimZero((n / 1e6).toFixed(2)) + 'M';
+      if (n >= 1e3) return trimZero((n / 1e3).toFixed(1)) + 'K';
+      return String(n);
+    }
+    if (n >= 1e8) return (n / 1e8).toFixed(2) + ' 亿';
+    if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万';
+    return String(n);
+  },
+  /** 把静态文案应用到 DOM（data-i18n / data-i18n-ph / data-i18n-title / data-i18n-html） */
+  applyStatic() {
+    document.documentElement.lang = this.lang === 'zh' ? 'zh-CN' : 'en';
+    document.title = this.t('appTitle');
+    for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = this.t(el.dataset.i18n);
+    for (const el of document.querySelectorAll('[data-i18n-ph]')) el.placeholder = this.t(el.dataset.i18nPh);
+    for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = this.t(el.dataset.i18nTitle);
+    for (const el of document.querySelectorAll('[data-i18n-html]')) el.innerHTML = this.t(el.dataset.i18nHtml);
+    // 语言切换按钮显示目标语言
+    const btn = document.getElementById('btn-lang');
+    if (btn) btn.textContent = this.lang === 'zh' ? '🌐 EN' : '🌐 中';
+  },
+};
+
+/* ---------- 1. 事件总线 EventBus（观察者模式：模块间解耦） ---------- */
+class EventBus {
+  constructor() { this._map = new Map(); }
+  on(event, fn) {
+    if (!this._map.has(event)) this._map.set(event, []);
+    this._map.get(event).push(fn);
+    return () => this.off(event, fn);
+  }
+  off(event, fn) {
+    const list = this._map.get(event);
+    if (!list) return;
+    const i = list.indexOf(fn);
+    if (i >= 0) list.splice(i, 1);
+  }
+  emit(event, ...args) {
+    const list = this._map.get(event);
+    if (!list) return;
+    for (const fn of [...list]) { try { fn(...args); } catch (e) { console.error('[EventBus]', event, e); } }
+  }
+}
+
+/* ---------- 2. 存储层 Storage（抽象接口 + 两种实现） ----------
+ *  接口: init / putBook / getBook / getAllBooks / deleteBook /
+ *        putChapters / getChapters / deleteChapters /
+ *        putPosition / getPosition / getSetting / setSetting /
+ *        exportAll / importAll / clearAll
+ *  默认实现: IndexedDB（浏览器原生数据库，容量大、异步）
+ *  降级实现: localStorage（某些受限浏览器环境，容量小，会提示）
+ */
+class IndexedDBAdapter {
+  constructor() { this.name = 'novel_reader_db'; this.version = 1; this.db = null; }
+  get mode() { return 'indexeddb'; }
+
+  init() {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') return reject(new Error('no indexedDB'));
+      const req = indexedDB.open(this.name, this.version);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('books'))     db.createObjectStore('books', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('chapters'))   db.createObjectStore('chapters', { keyPath: ['bookId', 'index'] });
+        if (!db.objectStoreNames.contains('positions'))  db.createObjectStore('positions', { keyPath: 'bookId' });
+        if (!db.objectStoreNames.contains('settings'))   db.createObjectStore('settings', { keyPath: 'key' });
+      };
+      req.onsuccess = () => { this.db = req.result; resolve(); };
+      req.onerror    = () => reject(req.error || new Error('IndexedDB open failed'));
+      req.onblocked  = () => reject(new Error('IndexedDB blocked by another tab'));
+    });
+  }
+  _tx(store, mode) { return this.db.transaction(store, mode).objectStore(store); }
+  _req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+
+  async putBook(book)    { await this._req(this._tx('books', 'readwrite').put(book)); }
+  async getBook(id)      { return this._req(this._tx('books', 'readonly').get(id)); }
+  async getAllBooks()    { return this._req(this._tx('books', 'readonly').getAll()); }
+  async deleteBook(id) {
+    const tx = this.db.transaction(['books', 'chapters', 'positions'], 'readwrite');
+    tx.objectStore('books').delete(id);
+    const range = IDBKeyRange.bound([id, 0], [id, Number.MAX_SAFE_INTEGER]);
+    tx.objectStore('chapters').delete(range);
+    tx.objectStore('positions').delete(id);
+    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error); });
+  }
+
+  async putChapters(bookId, chapters) {
+    const store = this._tx('chapters', 'readwrite');
+    for (const ch of chapters) await this._req(store.put(ch));
+  }
+  async getChapters(bookId) {
+    const range = IDBKeyRange.bound([bookId, 0], [bookId, Number.MAX_SAFE_INTEGER]);
+    const all = await this._req(this._tx('chapters', 'readonly').getAll(range));
+    all.sort((a, b) => a.index - b.index);
+    return all;
+  }
+
+  async putPosition(pos)   { await this._req(this._tx('positions', 'readwrite').put(pos)); }
+  async getPosition(id)    { return this._req(this._tx('positions', 'readonly').get(id)); }
+
+  async getSetting(key) {
+    const row = await this._req(this._tx('settings', 'readonly').get(key));
+    return row ? row.value : undefined;
+  }
+  async setSetting(key, value) {
+    await this._req(this._tx('settings', 'readwrite').put({ key, value, updatedAt: nowStamp() }));
+  }
+
+  async exportAll() {
+    const books = await this._req(this._tx('books', 'readonly').getAll());
+    const chapters = [];
+    for (const b of books) chapters.push({ bookId: b.id, items: await this.getChapters(b.id) });
+    const positions = await this._req(this._tx('positions', 'readonly').getAll());
+    const settings  = await this._req(this._tx('settings', 'readonly').getAll());
+    return { books, chapters, positions, settings };
+  }
+
+  async importAll(data, mode) {
+    const report = { books: 0, chapters: 0, positions: 0, settings: 0, skipped: 0 };
+    if (mode === 'overwrite') await this.clearAll();
+    // merge 模式下 localIds = 导入前已存在的书籍；只有这些书的内容才需要「跳过保留本地」
+    const localIds = mode === 'merge' ? new Set((await this.getAllBooks()).map(b => b.id)) : new Set();
+    for (const bk of data.books || []) {
+      if (mode === 'merge' && localIds.has(bk.id)) { report.skipped++; continue; }
+      await this.putBook(bk); report.books++;
+    }
+    for (const cg of data.chapters || []) {
+      if (mode === 'merge' && localIds.has(cg.bookId)) { report.skipped += (cg.items || []).length; continue; }
+      for (const ch of cg.items || []) { await this._req(this._tx('chapters', 'readwrite').put(ch)); report.chapters++; }
+    }
+    for (const p of data.positions || []) {
+      if (mode === 'merge' && localIds.has(p.bookId)) { report.skipped++; continue; }
+      await this.putPosition(p); report.positions++;
+    }
+    for (const s of data.settings || []) {
+      if (mode === 'merge' && await this.getSetting(s.key) !== undefined) { report.skipped++; continue; }
+      await this.setSetting(s.key, s.value); report.settings++;
+    }
+    return report;
+  }
+
+  async clearAll() {
+    for (const store of ['books', 'chapters', 'positions', 'settings']) {
+      await this._req(this._tx(store, 'readwrite').clear());
+    }
+  }
+}
+
+class LocalStorageAdapter {
+  constructor() {
+    this.P = 'nr1';
+    try { this._test(); } catch (e) { throw new Error('localStorage unavailable'); }
+  }
+  get mode() { return 'localstorage'; }
+  _test() { localStorage.setItem(this.P + ':t', '1'); localStorage.removeItem(this.P + ':t'); }
+  _get(key, def) { try { const v = localStorage.getItem(key); return v == null ? def : JSON.parse(v); } catch { return def; } }
+  _set(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); }
+    catch (e) { throw new Error(I18N.t('storageFull', { msg: e.message })); }
+  }
+  async init() {}
+  async putBook(book) {
+    const list = this._get(this.P + ':books', []);
+    const i = list.findIndex(b => b.id === book.id);
+    if (i >= 0) list[i] = book; else list.push(book);
+    this._set(this.P + ':books', list);
+  }
+  async getBook(id) { return this._get(this.P + ':books', []).find(b => b.id === id) || null; }
+  async getAllBooks() { return this._get(this.P + ':books', []); }
+  async deleteBook(id) {
+    this._set(this.P + ':books', this._get(this.P + ':books', []).filter(b => b.id !== id));
+    localStorage.removeItem(`${this.P}:ch:${id}`);
+    localStorage.removeItem(`${this.P}:pos:${id}`);
+  }
+  async putChapters(bookId, chapters) {
+    const existing = this._get(`${this.P}:ch:${bookId}`, []);
+    const map = new Map(existing.map(c => [c.index, c]));
+    for (const ch of chapters) map.set(ch.index, ch);
+    this._set(`${this.P}:ch:${bookId}`, [...map.values()].sort((a, b) => a.index - b.index));
+  }
+  async getChapters(bookId) { return this._get(`${this.P}:ch:${bookId}`, []); }
+  async putPosition(pos)    { this._set(`${this.P}:pos:${pos.bookId}`, pos); }
+  async getPosition(id)     { return this._get(`${this.P}:pos:${id}`, null); }
+  async getSetting(key)     { const all = this._get(this.P + ':settings', {}); return all[key]; }
+  async setSetting(key, value) {
+    const all = this._get(this.P + ':settings', {});
+    all[key] = value; this._set(this.P + ':settings', all);
+  }
+  async exportAll() {
+    const books = await this.getAllBooks();
+    const chapters = [], positions = [];
+    for (const b of books) {
+      chapters.push({ bookId: b.id, items: await this.getChapters(b.id) });
+      const p = await this.getPosition(b.id);
+      if (p) positions.push(p);
+    }
+    const s = this._get(this.P + ':settings', {});
+    return { books, chapters, positions, settings: Object.entries(s).map(([key, value]) => ({ key, value })) };
+  }
+  async importAll(data, mode) {
+    const report = { books: 0, chapters: 0, positions: 0, settings: 0, skipped: 0 };
+    const localIds = mode === 'merge' ? new Set((await this.getAllBooks()).map(b => b.id)) : new Set();
+    if (mode === 'overwrite') {
+      await this.clearAll();
+    }
+    for (const bk of data.books || []) {
+      if (mode === 'merge' && localIds.has(bk.id)) { report.skipped++; continue; }
+      await this.putBook(bk); report.books++;
+    }
+    for (const cg of data.chapters || []) {
+      if (mode === 'merge' && localIds.has(cg.bookId)) { report.skipped += (cg.items || []).length; continue; }
+      await this.putChapters(cg.bookId, cg.items || []); report.chapters += (cg.items || []).length;
+    }
+    for (const p of data.positions || []) {
+      if (mode === 'merge' && localIds.has(p.bookId)) { report.skipped++; continue; }
+      await this.putPosition(p); report.positions++;
+    }
+    for (const s of data.settings || []) {
+      const all = this._get(this.P + ':settings', {});
+      if (mode === 'merge' && all[s.key] !== undefined) { report.skipped++; continue; }
+      all[s.key] = s.value; this._set(this.P + ':settings', all); report.settings++;
+    }
+    return report;
+  }
+  async clearAll() {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(this.P + ':')) keys.push(k);
+    }
+    keys.forEach(k => localStorage.removeItem(k));
+  }
+}
+
+
+/* ---------- 3. 文本编解码 ---------- */
+/** 字节 → 文本：尝试 UTF-8(含BOM)，失败则 GBK，再失败则 Big5，最后 UTF-8 宽松模式 */
+function decodeTextBytes(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let offset = 0;
+  if (u8.length >= 3 && u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) offset = 3;
+  const slice = u8.subarray(offset);
+  const tryDecode = (enc, fatal) => {
+    try { return { text: new TextDecoder(enc, { fatal }).decode(slice), encoding: enc }; }
+    catch { return null; }
+  };
+  for (const enc of ['utf-8', 'gbk', 'big5']) {
+    const r = tryDecode(enc, true);
+    if (r) return r;
+  }
+  return { text: new TextDecoder('utf-8', { fatal: false }).decode(slice), encoding: 'utf-8(宽松)' };
+}
+
+/* ---------- 4. 章节切分（纯函数，同时用于 Web Worker 与主线程降级） ---------- */
+/**
+ * 把整本小说文本切分为章节数组。
+ * 规则: 优先按「第X章/卷/节」等标题行识别；标题行识别不足 2 个时，
+ *       退化为按固定字数切块，保证任何文本都能阅读。
+ * 返回: { chapters: [{index, title, paras: string[], chars}], totalChars }
+ */
+function splitChapters(text, opts = {}) {
+  const targetChars = opts.targetChars || 4500;
+  // 归一化换行 & 去掉 \r
+  let t = text.replace(/\r\n?/g, '\n').replace(/\uFEFF/g, '');
+  const lines = t.split('\n');
+
+  // --- 标题行识别 ---
+  const titleRe = [
+    /^\s*第\s*[0-9０-９零一二三四五六七八九十百千万两〇]+\s*[章节卷回部集篇][^\n]{0,60}\s*$/,  // 第十二章 风云
+    /^\s*(?:序\s*章|楔\s*子|前\s*言|引\s*子|题\s*记|尾\s*声|后\s*记|番\s*外|终\s*章|结\s*语)\s*$/, // 章节性段落
+    /^\s*(?:chapter|volume|part|book)\s+[0-9]{1,5}\s*[.:：]?\s*[^\n]{0,60}$/i,                  // Chapter 12: ...
+  ];
+  const isTitle = (s) => titleRe.some(re => re.test(s));
+
+  // 第一章的标题可能带后续内容（如「第一章 风起 洛城客栈中……」），只在确实无匹配时兜底
+  const idx = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isTitle(lines[i]) && lines[i].length <= 80) idx.push(i);
+  }
+
+  let chapters;
+  if (idx.length >= 2) {
+    // 主/卷目录中「第X章」跟正文分离的常见处理：标题行并入下一个正文段之前，跳过重复的空标题
+    const starts = [...idx, lines.length];
+    chapters = [];
+    let title = null;
+    let paras = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (isTitle(lines[i]) && lines[i].length <= 80) {
+        if (title !== null) chapters.push({ title, paras });
+        title = lines[i].replace(/^\s+|\s+$/g, '');
+        paras = [];
+      } else {
+        const s = lines[i].replace(/\s+/g, '').trim();
+        if (s) paras.push(s);
+      }
+    }
+    if (title !== null) chapters.push({ title, paras });
+    if (chapters.length === 0) chapters = null; // 全空：退回按块切分
+  }
+
+  // --- 兜底：按段落块 → 按目标字数切块 ---
+  if (!chapters) {
+    const blocks = [];
+    let cur = [];
+    let curLen = 0;
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s) {
+        if (cur.length) { blocks.push(cur); cur = []; curLen = 0; }
+        continue;
+      }
+      cur.push(s);
+      curLen += s.length;
+      if (curLen >= targetChars) { blocks.push(cur); cur = []; curLen = 0; }
+    }
+    if (cur.length) blocks.push(cur);
+    if (!blocks.length) blocks.push([]);
+    let merged = [];
+    for (const b of blocks) merged = merged.concat(b);
+    if (merged.length === 0) merged = ['（空白文档：无内容）'];
+    // 把段落聚成「节」；超长段落按字符切段，保证任意文本都能被分章
+    chapters = [];
+    let chunk = [];
+    let len = 0;
+    const flushChunk = () => {
+      if (chunk.length) { chapters.push(chunk); chunk = []; len = 0; }
+    };
+    const addPara = (p) => {
+      let rest = p;
+      while (rest.length > targetChars) {
+        const piece = rest.slice(0, targetChars);
+        chunk.push(piece); len += piece.length;
+        flushChunk();
+        rest = rest.slice(targetChars);
+      }
+      chunk.push(rest); len += rest.length;
+      if (len >= targetChars) flushChunk();
+    };
+    for (const p of merged) addPara(p);
+    flushChunk();
+    chapters = chapters.map((chunk, i) => ({
+      title: `第 ${i + 1} 节`,
+      paras: chunk,
+    }));
+  }
+
+  // --- 过滤空章节 / 计算字数 ---
+  chapters = chapters
+    .filter(c => c.paras.length > 0)
+    .map((c, i) => {
+      const chars = c.paras.reduce((n, p) => n + p.length, 0);
+      return { index: i, title: c.title || `第 ${i + 1} 节`, paras: c.paras, chars };
+    });
+  if (!chapters.length) {
+    chapters = [{ index: 0, title: '正文', paras: ['（没有可显示的正文内容）'], chars: 0 }];
+  }
+  const totalChars = chapters.reduce((n, c) => n + c.chars, 0);
+  return { chapters, totalChars };
+}
+
+/* ---------- 5. 后台 Worker（多线程） ---------- */
+/*  优先把章节切分放到独立线程执行，主线程保持流畅；
+ *  若 Worker 创建失败（受限环境），自动降级为在主线程同步执行（对应函数见上）。 */
+const WORKER_SCRIPT = `'use strict';
+${splitChapters.toString()}
+self.onmessage = (e) => {
+  const { id, text } = e.data || {};
+  try {
+    const r = splitChapters(text);
+    self.postMessage({ id, ok: true, chapters: r.chapters, totalChars: r.totalChars });
+  } catch (err) {
+    self.postMessage({ id, ok: false, error: String(err && err.stack || err) });
+  }
+};`;
+
+class TextWorker {
+  constructor() {
+    this.worker = null;
+    this.seq = 0;
+    this.pending = new Map();
+  }
+  get available() { return !!this.worker; }
+
+  static create() {
+    const w = new TextWorker();
+    try {
+      const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      w.worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      w.worker.onmessage = (e) => {
+        const { id, ok, error, ...rest } = e.data || {};
+        const p = w.pending.get(id);
+        if (!p) return;
+        w.pending.delete(id);
+        ok ? p.resolve(rest) : p.reject(new Error(error));
+      };
+      w.worker.onerror = (e) => {
+        w.worker = null;
+        for (const p of w.pending.values()) p.reject(new Error(I18N.t('workerErr', { msg: e.message })));
+        w.pending.clear();
+      };
+    } catch (e) {
+      console.warn('Web Worker 不可用，将使用主线程切分:', e);
+      w.worker = null;
+    }
+    return w;
+  }
+
+  /** 切分文本；Worker 不可用时主线程执行（同为异步接口，调用方无感知） */
+  split(text) {
+    if (!this.worker) {
+      // 分片让出主线程，避免大文件阻塞 UI（异步编程）
+      return new Promise(resolve => {
+        setTimeout(() => {
+          const r = splitChapters(text);
+          resolve({ chapters: r.chapters, totalChars: r.totalChars });
+        }, 0);
+      });
+    }
+    return new Promise((resolve, reject) => {
+      const id = ++this.seq;
+      this.pending.set(id, { resolve, reject });
+      this.worker.postMessage({ id, text });
+    });
+  }
+  destroy() { if (this.worker) { this.worker.terminate(); this.worker = null; } }
+}
+
+/* ---------- 6. 数据管理 DataManager（仓库模式：统一书籍/章节/进度/设置的读写） ---------- */
+class DataManager {
+  constructor(adapter, bus) {
+    this.adapter = adapter;
+    this.bus = bus;
+    this._booksCache = null;
+    this.requestId = 0;
+  }
+  get mode() { return this.adapter.mode; }
+
+  /* ---- 书籍 ---- */
+  async listBooks() {
+    if (!this._booksCache) {
+      const books = await this.adapter.getAllBooks();
+      books.forEach(b => { if (!b.chapterChars) b.chapterChars = []; });
+      this._booksCache = books;
+    }
+    return this._booksCache.slice().sort((a, b) => (b.lastReadAt || 0) > (a.lastReadAt || 0) ? 1 : -1);
+  }
+  async getBook(id) {
+    const b = await this.adapter.getBook(id);
+    if (b && !b.chapterChars) b.chapterChars = [];
+    return b;
+  }
+  async saveBook(book) {
+    if (this._booksCache) {
+      const i = this._booksCache.findIndex(b => b.id === book.id);
+      if (i >= 0) this._booksCache[i] = book; else this._booksCache.push(book);
+    }
+    await this.adapter.putBook(book);
+    this.bus.emit('books:changed');
+  }
+  async deleteBook(id) {
+    this._booksCache = null;
+    await this.adapter.deleteBook(id);
+    this.bus.emit('books:changed');
+  }
+
+  /* ---- 导入 ---- */
+  /** 计算书籍 ID（内容哈希，可复现 → 相同文件识别为同一本书） */
+  static bookIdOf(text) {
+    const sample = (text.length > 2048 ? text.slice(0, 1024) + text.slice(text.length - 1024) : text) + ':' + text.length;
+    return 'book_' + fnv1a(sample);
+  }
+
+  /**
+   * 导入文本。返回 { duplicate, book }；duplicate 时 book 为已存在的旧书籍。
+   */
+  async importText({ title, sourceName, text }) {
+    const id = DataManager.bookIdOf(text);
+    const existing = await this.getBook(id);
+    if (existing) {
+      return { duplicate: true, book: existing };
+    }
+    const book = await this._splitAndSave(id, title, sourceName, text);
+    return { duplicate: false, book };
+  }
+
+  /** 覆盖导入（去重确认后）：保留同一 id，重置阅读进度 */
+  async replaceBook({ id, title, sourceName, text }) {
+    const book = await this._splitAndSave(id, title, sourceName, text);
+    await this.adapter.putPosition({ bookId: id, chapterIndex: 0, pageIndex: 0, percent: 0, charOffset: 0, updatedAt: nowStamp() });
+    return book;
+  }
+
+  async _splitAndSave(id, title, sourceName, text) {
+    const now = Date.now();
+    const book = {
+      id,
+      title: title || sourceName || I18N.t('untitled'),
+      sourceName: sourceName || '',
+      encoding: '',
+      size: text.length,
+      importedAt: now,
+      updatedAt: now,
+      lastReadAt: 0,
+      percent: 0,
+      hash: DataManager.bookIdOf(text),
+    };
+    const progress = progressUI();
+    progress.show(I18N.t('progSplit'));
+    progress.setSub(I18N.t('progWorker'));
+    progress.set(0.05);
+    // 切分（Web Worker 线程 / 主线程降级）
+    const { chapters, totalChars } = await this._worker.split(text);
+    progress.setSub(I18N.t('progOrganize'));
+    book.chapterCount = chapters.length;
+    book.totalChars = totalChars;
+    book.chapterChars = chapters.map(c => c.chars);
+    book.chapterTitles = chapters.map(c => c.title);
+    // 写入数据库（异步分批）
+    progress.show(I18N.t('progWrite'));
+    const list = chapters.map((c, i) => ({
+      bookId: id, index: i, title: c.title, paras: c.paras, chars: c.chars,
+    }));
+    for (let i = 0; i < list.length; i += 200) {
+      const batch = list.slice(i, i + 200);
+      await this.adapter.putChapters(id, batch);
+      progress.set(0.1 + 0.85 * (Math.min(i + 200, list.length) / list.length));
+    }
+    book.updatedAt = Date.now();
+    progress.set(0.97);
+    await this.saveBook(book);
+    progress.set(1);
+    progress.done();
+    return book;
+  }
+
+  /* ---- 章节 ---- */
+  async loadChapters(bookId) {
+    const chapters = await this.adapter.getChapters(bookId);
+    return chapters;
+  }
+
+  /* ---- 阅读进度 ---- */
+  async savePosition({ bookId, chapterIndex, pageIndex, percent, charOffset }) {
+    const pos = { bookId, chapterIndex, pageIndex, percent, charOffset, updatedAt: nowStamp() };
+    await this.adapter.putPosition(pos);
+    const book = await this.getBook(bookId);
+    if (book) {
+      book.percent = percent;
+      book.lastReadAt = Date.now();
+      await this.saveBook(book);
+    }
+    return pos;
+  }
+  async getPosition(bookId) { return this.adapter.getPosition(bookId); }
+
+  /* ---- 设置 ---- */
+  async getSetting(key, def) { const v = await this.adapter.getSetting(key); return v === undefined ? def : v; }
+  async setSetting(key, value) {
+    await this.adapter.setSetting(key, value);
+    this.bus.emit('settings:changed', { key, value });
+  }
+
+  /* ---- 备份 ---- */
+  async exportAll() { return this.adapter.exportAll(); }
+  async importAll(data, mode) { return this.adapter.importAll(data, mode); }
+}
+
+/* ---------- 7. 词典服务 DictionaryService（策略模式：多部离线词典可切换） ---------- */
+/*  词典数据以「word|释义」文本行内嵌打包（见 dict-data 一节），运行时解析为 Map，
+ *  支持: 英→中、中→英（含最大正向匹配分词）、成语解释、汉字逐字详解，
+ *  以及用户自定义词条（持久化于设置中，查询优先级最高）。 */
+class DictionaryService {
+  constructor(bus) {
+    this.bus = bus;
+    this.maps = {};        // dictId -> Map<word, gloss>
+    this.firstChars = {};  // dictId -> Set<首字符>（用于中文最大匹配加速）
+    this.custom = [];      // 用户自定义词条 [{word, gloss}]
+    this._inited = false;
+  }
+
+  /** 词典元信息（策略注册表） */
+  static get DICTS() {
+    return [
+      { id: 'en2cn',  name: '英 译 中', hint: '英语单词/短语 → 中文释义' },
+      { id: 'cn2en',  name: '中 译 英', hint: '中文常用词 → 英语释义' },
+      { id: 'idioms', name: '成语解释', hint: '四字成语 / 惯用语释义' },
+      { id: 'chars',  name: '汉字详解', hint: '常见汉字 → 简明释义' },
+    ];
+  }
+
+  async init(customEntries) {
+    this.custom = customEntries || [];
+    this._inited = true;
+    for (const d of DictionaryService.DICTS) this._buildMap(d.id, RAW_DICTS[d.id]);
+  }
+
+  _buildMap(id, raw) {
+    const map = new Map();
+    const firsts = new Set();
+    for (const line of raw.split('\n')) {
+      const i = line.indexOf('|');
+      if (i <= 0) continue;
+      const word = line.slice(0, i).trim();
+      const gloss = line.slice(i + 1).trim();
+      if (!word || !gloss) continue;
+      map.set(word, gloss);
+      if (word.length <= 4) firsts.add(word[0]);
+    }
+    this.maps[id] = map;
+    this.firstChars[id] = firsts;
+  }
+
+  /** 自定义词条（设置持久化） */
+  customMap() {
+    const m = new Map();
+    for (const c of this.custom) { const g = String(c.gloss || '').trim(); if (c.word && g) m.set(String(c.word).trim(), g); }
+    return m;
+  }
+
+  async addCustomEntry(word, gloss) {
+    word = String(word).trim(); gloss = String(gloss).trim();
+    if (!word || !gloss) return false;
+    const i = this.custom.findIndex(c => c.word === word);
+    if (i >= 0) this.custom[i] = { word, gloss }; else this.custom.push({ word, gloss });
+    await this._emitCustom();
+    return true;
+  }
+  async removeCustomEntry(word) {
+    this.custom = this.custom.filter(c => c.word !== word);
+    await this._emitCustom();
+  }
+  async _emitCustom() {
+    this.bus.emit('dict:custom-changed', this.custom);
+  }
+
+  lookup(word, dictId) {
+    const g = this.customMap().get(word);
+    if (g) return { dict: '自定义', gloss: g };
+    const gloss = this.maps[dictId] && this.maps[dictId].get(word);
+    if (gloss) return { dict: dictId, gloss };
+    return null;
+  }
+
+  /** 文本语言检测: 中文为主返回 'cn'，否则 'en' */
+  static detectLang(text) {
+    if (!text) return 'cn';
+    let cjk = 0, total = 0;
+    for (const ch of text) {
+      if (/\s/.test(ch)) continue;
+      total++;
+      if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) cjk++;
+    }
+    return total > 0 && cjk / total >= 0.35 ? 'cn' : 'en';
+  }
+
+  /** 英文分词: 提取 [A-Za-z']+ 单词序列（保留位置用于映射回原文） */
+  static tokenizeEn(text) {
+    const tokens = [];
+    const re = /[A-Za-z'][A-Za-z']*/g;
+    let m;
+    while ((m = re.exec(text))) tokens.push({ word: m[0], start: m.index, end: m.index + m[0].length });
+    // 合并为位置区间（含间隔），用于整句翻译
+    return tokens;
+  }
+
+  /**
+   * 翻译一段文本。
+   * 中文: 最大正向匹配分词（词典优先 → 逐字兜底）。
+   * 英文: 单词区序列，尝试最长 1-4 词短语匹配。
+   * 返回 { lang, segments: [{txt, gloss|null, dict|null}], glossText, unknown }
+   */
+  translate(text) {
+    text = text.replace(/\s+/g, ' ').trim();
+    const lang = DictionaryService.detectLang(text);
+    if (lang === 'en') return this._translateEn(text);
+    return this._translateCn(text);
+  }
+
+  _translateCn(text) {
+    const segs = [];
+    const keyset = new Set([...this.maps.cn2en.keys()].filter(k => k.length <= 4));
+    let i = 0;
+    const N = text.length;
+    while (i < N) {
+      let hit = null;
+      const maxLen = Math.min(4, N - i);
+      for (let L = maxLen; L >= 1; L--) {
+        const word = text.slice(i, i + L);
+        if (keyset.has(word)) { hit = { word, dict: 'cn2en' }; break; }
+      }
+      if (hit) {
+        segs.push({ txt: hit.word, gloss: this.maps.cn2en.get(hit.word), dict: hit.dict });
+        i += hit.word.length;
+      } else {
+        const ch = text[i];
+        const charGloss = this.maps.chars.get(ch);
+        segs.push({ txt: ch, gloss: charGloss || null, dict: charGloss ? 'chars' : null });
+        i += 1;
+      }
+    }
+    return {
+      lang: 'cn',
+      segments: segs,
+      glossText: segs.map(s => (s.gloss ? `${s.txt}(${s.gloss})` : s.txt)).join(' '),
+      unknown: segs.filter(s => !s.gloss).map(s => s.txt),
+    };
+  }
+
+  _translateEn(text) {
+    const tokens = DictionaryService.tokenizeEn(text);
+    const map = this.maps.en2cn;
+    const segs = [];
+    let li = 0;
+    while (li < tokens.length) {
+      let hit = null;
+      // 尝试最长 4 词短语
+      for (let L = Math.min(4, tokens.length - li); L >= 1; L--) {
+        const phrase = tokens.slice(li, li + L).map(t => t.word).join(' ').toLowerCase();
+        const g = this.customMap().get(phrase) || map.get(phrase);
+        if (g) { hit = { phrase, gloss: g, len: L }; break; }
+      }
+      if (hit) {
+        const raw = tokens.slice(li, li + hit.len);
+        segs.push({
+          txt: raw.map(t => t.word).join(' '),
+          gloss: hit.gloss,
+          dict: 'en2cn',
+        });
+        li += hit.len;
+      } else {
+        const t = tokens[li];
+        const stem = this._stem(t.word.toLowerCase());
+        const g = this.customMap().get(stem) || map.get(stem);
+        segs.push({ txt: t.word, gloss: g || null, dict: g ? 'en2cn' : null });
+        li += 1;
+      }
+    }
+    return {
+      lang: 'en',
+      segments: segs,
+      glossText: segs.map(s => (s.gloss ? `${s.txt} → ${s.gloss}` : s.txt)).join('；'),
+      unknown: segs.filter(s => !s.gloss).map(s => s.txt),
+    };
+  }
+
+  /** 简单词干还原（-s -es -ed -ing 型） */
+  _stem(w) {
+    if (w.length <= 4) return w;
+    for (const suf of ['ing', 'es', 'ed', 's']) {
+      if (w.endsWith(suf) && w.length - suf.length >= 3) return w.slice(0, -suf.length).replace(/ie$/, 'y').replace(/e$/, '');
+    }
+    return w;
+  }
+
+  /** 中文解释：成语 + 词语 + 逐字 + 未知字 */
+  explain(text) {
+    text = text.replace(/\s+/g, '').trim();
+    if (!text) return null;
+    const res = { idiom: null, words: [], chars: [], unknown: [] };
+    // 成语 / 惯用语整条匹配
+    if (this.maps.idioms.has(text)) res.idiom = { word: text, gloss: this.maps.idioms.get(text) };
+    else if (text.length <= 12) {
+      // 尝试在文本内找到最长成语
+      let best = null;
+      for (let i = 0; i < text.length; i++) {
+        for (let L = Math.min(4, text.length - i); L >= 3; L--) {
+          const w = text.slice(i, i + L);
+          const g = this.maps.idioms.get(w);
+          if (g) { best = { word: w, gloss: g, start: i }; break; }
+        }
+        if (best) break;
+      }
+      if (best) res.idiom = best;
+    }
+    // 词语最大匹配
+    const keyset = new Set([...this.maps.cn2en.keys()].filter(k => k.length <= 4));
+    let i = 0;
+    while (i < text.length) {
+      let hit = null;
+      for (let L = Math.min(4, text.length - i); L >= 1; L--) {
+        const w = text.slice(i, i + L);
+        if (keyset.has(w)) { hit = { word: w, gloss: this.maps.cn2en.get(w) }; break; }
+      }
+      if (hit) { res.words.push(hit); i += hit.word.length; }
+      else { res.chars.push(text[i]); i += 1; }
+    }
+    for (const ch of [...new Set(res.chars)]) {
+      if (!this.maps.chars.has(ch)) res.unknown.push(ch);
+    }
+    return res;
+  }
+}
+
+
+/* ---------- 8. 内嵌离线词典数据（打包进 HTML，零网络依赖） ----------
+ *  行格式: `word|释义1;释义2`
+ *  英语→中文：常用英语词汇与短语（约 700 条，含常用短语）
+ */
+const RAW_DICTS = {
+en2cn: `a|一(个);一种;每(一)
+ability|能力;才能
+able|能够;有能力的
+about|关于;大约;到处
+above|在…之上;超过
+accept|接受;承认;同意
+accident|事故;意外
+according|按照;根据
+account|账户;账目;叙述;理由
+achieve|达到;实现;取得
+across|穿过;横过;在对面
+act|行动;表演;法案
+action|行动;行为;作用
+active|积极的;活跃的
+activity|活动;行动
+actor|演员;男演员
+actual|实际的;真实的
+add|加;增加;补充说
+address|地址;演讲;处理
+admire|钦佩;羡慕;赞赏
+admit|承认;准许进入;容纳
+advance|前进;进展;预先的
+advantage|优点;优势;有利条件
+adventure|冒险;奇遇
+advice|建议;忠告;意见
+advise|建议;劝告;通知
+affair|事情;事务;风流韵事
+affect|影响;感动;假装
+afford|负担得起;提供
+afraid|害怕的;担心的
+after|在…之后;后来
+afternoon|下午
+again|再次;又一次
+against|反对;倚着;对着
+age|年龄;时代;变老
+agency|代理机构;中介
+ago|以前
+agree|同意;赞成;一致
+agreement|协议;同意
+ahead|在前面;提前
+air|空气;天空;播送
+airport|机场
+alive|活着的;有活力的
+all|所有的;全部;都
+allow|允许;准许;给予
+almost|几乎;差不多
+alone|独自;单独的;仅仅
+along|沿着;向前;一起
+already|已经
+also|也;而且
+although|虽然;尽管
+always|总是;始终;永远
+amaze|使惊奇;使吃惊
+among|在…之中;在…中间
+amount|数量;总额;总计
+ancient|古代的;古老的
+anger|愤怒;怒气
+angle|角度;观点;角落
+angry|生气的;愤怒的
+animal|动物;野兽
+announce|宣布;宣告;声称
+annoy|使恼怒;打扰
+another|另一个;又一个
+answer|回答;答案;回应
+anxiety|焦虑;忧虑;渴望
+any|任何的;一些;丝毫
+anybody|任何人
+anyone|任何人
+anything|任何事物;无论什么
+apart|分开;相距;除了
+apartment|公寓;房间
+appear|出现;显得;似乎
+apple|苹果
+apply|申请;应用;适用
+approach|接近;方法;途径
+approve|批准;赞成;认可
+area|地区;面积;领域
+argue|争论;辩论;主张
+argument|争论;论点;理由
+arise|出现;产生;升起
+arm|手臂;武器;武装
+army|军队;陆军
+around|在…周围;大约;到处
+arrange|安排;整理;筹备
+arrive|到达;抵达
+art|艺术;美术;技艺
+article|文章;物品;条款
+artist|艺术家;画家
+ask|问;请求;要求
+asleep|睡着的
+assist|帮助;协助
+assistant|助手;助理;助教
+attack|攻击;抨击;发作
+attempt|尝试;企图;试图
+attend|出席;参加;照顾
+attention|注意;关注;照料
+attitude|态度;看法;姿势
+attract|吸引;引起
+audience|观众;听众;读者
+author|作者;作家;创始人
+autumn|秋天;秋季
+available|可用的;可获得的;有空的
+average|平均的;普通的;平均数
+avoid|避免;回避;躲开
+awake|醒着的;唤醒;觉醒
+award|奖品;授予;判定
+away|离开;远离;不在
+awful|可怕的;糟糕的
+baby|婴儿;宝贝
+back|后面;背部;回来;支持
+background|背景;幕后;经历
+bad|坏的;糟糕的;严重的
+bag|袋子;书包;手提包
+balance|平衡;余额;均衡
+ball|球;舞会
+band|乐队;带子;波段
+bank|银行;河岸;堤
+bar|酒吧;条;棒;栅栏
+base|基础;基地;以…为基础
+basic|基本的;基础的
+basin|盆地;水盆;流域
+battle|战斗;斗争;战役
+bay|海湾;港湾
+be|是;存在
+beach|海滩;沙滩
+bear|熊;忍受;承担
+beat|打败;敲打;跳动;节拍
+beautiful|美丽的;漂亮的
+beauty|美丽;美人;美景
+because|因为
+become|变成;成为
+bed|床;河床;底部
+before|在…之前;以前
+begin|开始
+beginning|开始;起初;开端
+behind|在…后面;落后;支持
+being|存在;生物;人
+believe|相信;认为
+bell|钟;铃;铃声
+belong|属于;应归入
+below|在…下面;低于
+beneath|在…下方;低于
+beside|在…旁边;与…相比
+best|最好的;最佳
+better|更好的;较好
+between|在…之间
+beyond|超出;在…那边
+big|大的;重要的
+bill|账单;法案;钞票;鸟嘴
+bird|鸟;禽
+birth|出生;分娩;起源
+birthday|生日
+bit|一点;小块;钻头
+black|黑色的;黑
+blame|责备;归咎;责任
+bless|祝福;保佑
+block|街区;块;阻塞
+blood|血;血液;血统
+blow|吹;打击;吹风
+blue|蓝色的;忧郁的
+board|板;董事会;上船;登机
+boat|船;小船
+body|身体;主体;尸体
+boil|煮沸;沸腾;疖
+bold|大胆的;粗体的;醒目的
+bone|骨头;骨骼
+book|书;预订;册
+border|边境;边界;边缘
+born|出生的;天生的
+borrow|借;借用
+boss|老板;上司
+both|两者都
+bottle|瓶子
+bottom|底部;末端;屁股
+bound|必然的;受约束的;跳跃
+bowl|碗;钵;保龄球
+box|盒子;箱子;包厢;拳击
+boy|男孩
+brain|大脑;智力
+branch|树枝;分支;分行
+brave|勇敢的;无畏的
+bread|面包
+break|打破;休息;中断;弄坏
+breakfast|早餐
+breath|呼吸;气息
+breathe|呼吸;喘息
+bridge|桥;桥梁;桥牌
+bright|明亮的;聪明的;鲜艳的
+bring|带来;促使;引起
+broad|宽阔的;广泛的
+brother|兄弟
+brown|棕色的;褐色
+brush|刷子;刷;轻拂
+build|建造;建立;开发
+building|建筑物;大楼
+burn|燃烧;烧伤;烧毁
+bury|埋葬;掩埋;隐藏
+business|生意;业务;事务;事业
+busy|忙碌的;繁忙的
+but|但是;可是;除了
+buy|买;购买
+by|通过;被;在…旁边;到…为止
+cake|蛋糕;饼
+call|打电话;称呼;呼叫;拜访
+calm|平静的;镇静的;使平静
+camera|照相机;摄像机
+camp|营地;露营;阵营
+can|能;可以;罐头;金属罐
+cancel|取消;撤销;删去
+cancer|癌症;癌;巨蟹座
+candidate|候选人;应试者
+capital|首都;资本;大写字母;重要的
+captain|船长;队长;上尉
+car|汽车;轿车
+card|卡片;纸牌;名片
+care|关心;照顾;小心;在乎
+careful|小心的;仔细的
+carry|携带;搬运;支撑
+case|情况;案件;箱子;事例
+cash|现金;兑现
+cast|投掷;演员阵容;铸型
+castle|城堡;堡垒
+cat|猫
+catch|抓住;赶上;接住;感染
+cause|原因;事业;引起;造成
+celebrate|庆祝;颂扬
+cell|细胞;牢房;小房间
+center|中心;中央;居中
+century|世纪;百年
+certain|确定的;某些;必然的
+chair|椅子;主席;主持
+chairman|主席;董事长
+chance|机会;可能性;偶然
+change|改变;变化;零钱
+character|性格;角色;汉字;特征
+charge|收费;充电;指控;负责
+chart|图表;海图;规划
+chase|追逐;追赶;追求
+cheap|便宜的;廉价的
+check|检查;核对;支票;账单
+cheer|欢呼;使高兴;加油
+cheese|奶酪;干酪
+chemical|化学的;化学品
+chest|胸部;箱子;柜子
+chicken|鸡;鸡肉;胆小鬼
+child|孩子;儿童
+childhood|童年;儿童时期
+choice|选择;挑选;供选择的
+choose|选择;挑选;宁愿
+church|教堂;教会
+circle|圆圈;循环;环绕
+citizen|公民;市民
+city|城市
+civil|公民的;民事的;文明的
+claim|声称;索取;要求;索赔
+class|班级;阶级;课;等级
+classic|经典的;古典的;名著
+clean|干净的;清洁
+clear|清楚的;晴朗的;清除;明白
+clever|聪明的;机灵的
+climb|爬;攀登;上升
+clock|时钟;钟表
+close|关闭;接近的;亲密的
+cloth|布;布料;织物
+clothes|衣服;服装
+cloud|云;阴影
+club|俱乐部;球棒;棍
+coach|教练;长途汽车;辅导
+coal|煤;煤炭
+coast|海岸;沿海地区
+coat|外套;涂层;覆盖
+coffee|咖啡
+cold|冷的;寒冷;感冒
+collect|收集;收藏;集合
+college|学院;大学
+color|颜色;色彩;着色
+column|列;专栏;圆柱
+come|来;到来;出现
+comfort|安慰;舒适;使舒适
+command|命令;指挥;掌握
+comment|评论;意见;注释
+common|共同的;常见的;普通的
+communicate|交流;沟通;传达
+community|社区;社会;团体
+company|公司;陪伴;连队
+compare|比较;对比;比喻
+compete|竞争;比赛;对抗
+competition|竞争;比赛;竞赛
+complain|抱怨;投诉;申诉
+complete|完整的;完成;结束
+computer|计算机;电脑
+concern|关心;担心;涉及;事务
+condition|条件;状况;环境
+confident|自信的;确信的
+confirm|确认;证实;批准
+confuse|使困惑;混淆;搞乱
+connect|连接;联系;接通
+consider|考虑;认为;体贴
+contain|包含;容纳;抑制
+content|内容;满意的;含量
+continue|继续;延续;持续
+control|控制;管理;克制
+conversation|谈话;对话;会话
+cook|烹饪;厨师;做饭
+cool|凉爽的;酷的;冷静的
+copy|复制;副本;抄写
+corner|角落;拐角;困境
+correct|正确的;改正;纠正
+cost|花费;成本;付出代价
+cough|咳嗽;咳出
+count|计数;数;重要;伯爵
+country|国家;乡村;国土
+courage|勇气;胆量
+course|课程;过程;路线;当然
+court|法庭;球场;宫廷
+cover|覆盖;封面;掩饰;涵盖
+cow|奶牛;母牛
+crash|碰撞;坠毁;崩溃
+crazy|疯狂的;疯狂的
+create|创造;创作;创建
+creature|生物;动物;人
+credit|信用;信贷;学分;功劳
+crime|犯罪;罪行;罪恶
+criminal|罪犯;刑事的;犯罪的
+cross|穿过;交叉;十字;生气的
+crowd|人群;群众;拥挤
+cruel|残忍的;残酷的
+cry|哭;喊叫;叫声
+culture|文化;培养;教养
+cup|杯子;奖杯
+curious|好奇的;稀奇的
+custom|风俗;习惯;海关
+customer|顾客;客户
+cut|切;削减;伤口;剪
+daily|每日的;日报;日常的
+damage|损害;损失;破坏
+dance|跳舞;舞蹈
+danger|危险;威胁
+dangerous|危险的
+dare|敢;敢于;激将
+dark|黑暗的;深色的;黑暗
+data|数据;资料
+date|日期;约会;枣
+daughter|女儿
+day|天;白天;日子
+dead|死的;完全的;麻木的
+deal|处理;交易;大量;协议
+dear|亲爱的;昂贵的;珍贵的
+death|死亡;死;致死
+debate|辩论;争论;讨论
+debt|债务;欠款;恩情
+decide|决定;判决;下决心
+decision|决定;决心;判决
+deep|深的;深刻的;深沉
+defeat|击败;失败;挫折
+defend|保卫;辩护;防守
+degree|程度;度;学位
+delay|推迟;耽搁;延误
+deliver|递送;发表;交付;接生
+demand|要求;需求;需要;询问
+department|部门;系;部
+depend|依靠;依赖;取决于
+describe|描述;形容;描绘
+design|设计;图案;构思
+desire|渴望;欲望;希望
+desk|书桌;办公桌;柜台
+destroy|破坏;摧毁;消灭
+detail|细节;详情;详细说明
+develop|发展;开发;生长;冲洗
+development|发展;开发;成长
+device|设备;装置;手段
+devote|奉献;专心致力于
+dialog|对话;对白
+dictionary|词典;字典
+die|死;消亡;渴望
+difference|差异;不同;差别
+different|不同的;各种的
+difficult|困难的;艰难的
+difficulty|困难;难度;难题
+dig|挖;掘;钻研
+dinner|晚餐;正餐
+direct|直接的;指导;导演;指挥
+direction|方向;指导;说明
+dirty|脏的;卑鄙的
+discover|发现;发觉;找到
+discuss|讨论;商议;论述
+discussion|讨论;论述
+disease|疾病;病
+dish|盘子;菜肴;一道菜
+distance|距离;远处;差距
+distant|遥远的;疏远的
+divide|分割;分开;分歧;除法
+doctor|医生;博士
+dog|狗
+dollar|美元;元
+door|门;入口
+doubt|怀疑;疑虑;不确定
+down|向下;在下方;沿着;下降
+drag|拖;拽;拖曳
+draw|画;拉;吸引;抽取;平局
+dream|梦;梦想;做梦
+dress|连衣裙;服装;穿衣;打扮
+drink|喝;饮料;酒
+drive|驾驶;驱动;驱动器;车道
+driver|司机;驾驶员
+drop|掉落;下降;滴;放弃
+dry|干的;干燥的;擦干
+duck|鸭子;躲避
+during|在…期间
+duty|责任;义务;值班;税
+each|每个;各自
+eager|渴望的;热切的
+ear|耳朵;穗
+early|早的;早期的;提前
+earn|赚;挣得;赢得
+earth|地球;泥土;陆地
+east|东方;东部的;向东
+easy|容易的;轻松的
+eat|吃;进食
+edge|边缘;刀刃;优势
+education|教育;培养;教育学
+effect|效果;影响;作用
+effort|努力;成就;费力
+egg|蛋;鸡蛋
+eight|八
+either|两者任一;也
+elder|年长的;长辈
+electric|电的;电动的
+elephant|大象
+else|其他;另外;否则
+emotion|情感;情绪;感动
+employ|雇用;使用
+empty|空的;倒空
+encourage|鼓励;促进;支持
+end|结束;末端;终点;目的
+enemy|敌人;仇敌
+energy|能量;精力;能源
+engine|发动机;引擎
+engineer|工程师;技师
+enjoy|享受;喜欢;欣赏
+enough|足够的;充足地;足够
+enter|进入;参加;输入
+entire|整个的;全部的
+environment|环境;周围状况
+equal|平等的;相等的;等于
+equipment|设备;装备;器材
+escape|逃跑;逃脱;逃避
+especially|尤其;特别
+establish|建立;确立;创办
+even|甚至;更;平的;均匀的
+evening|傍晚;晚上
+event|事件;活动;比赛项目
+ever|曾经;在任何时候;始终
+every|每个;所有的;每逢
+everybody|每个人;人人
+everyday|每天的;日常的
+everyone|每人;人人
+everything|一切;所有事物
+everywhere|到处;处处
+evil|邪恶的;邪恶;坏事
+exact|精确的;确切的
+examine|检查;审查;考试
+example|例子;榜样;实例
+excellent|极好的;优秀的
+except|除了;除外
+exchange|交换;兑换;交流
+excited|兴奋的;激动的
+excuse|借口;原谅;辩解
+exercise|锻炼;练习;演习
+exist|存在;生存;生活
+expect|期待;预期;指望
+expensive|昂贵的;花钱多的
+experience|经验;经历;体验
+experiment|实验;试验
+expert|专家;内行的
+explain|解释;说明;讲解
+explanation|解释;说明
+explore|探索;勘探;探究
+express|表达;表示;快递;特快
+expression|表达;表情;短语
+extra|额外的;特别的;额外费用
+eye|眼睛;视力
+face|脸;面对;表面;方面
+fact|事实;实际;真相
+factor|因素;要素;因子
+fail|失败;不及格;未能
+failure|失败;故障;失败者
+fair|公平的;集市;尚好的;白皙的
+faith|信仰;信念;信心
+fall|落下;秋天;跌倒;瀑布
+false|错误的;假的;虚伪的
+familiar|熟悉的;亲密的
+family|家庭;家人;家族
+famous|著名的;出名的
+fan|风扇;迷;狂热爱好者
+fancy|花哨的;想象;喜爱
+far|远的;遥远;大大地
+farm|农场;农田;务农
+fast|快的;快的;禁食
+fat|肥胖的;脂肪
+father|父亲;爸爸;神父
+fault|过错;故障;缺点
+fear|恐惧;害怕;担心
+feather|羽毛;翎毛
+feature|特征;特色;以…为特色
+feed|喂养;饲养;供应
+feel|感觉;触摸;觉得
+feeling|感觉;感情;感受
+fellow|同伴;家伙;同事的
+fence|栅栏;篱笆;围墙
+fever|发烧;狂热;热度
+few|很少的;几个
+field|田野;领域;场地
+fight|打架;斗争;战斗
+figure|数字;人物;身材;认为;图形
+fill|装满;填充;补上
+film|电影;胶片;拍摄
+final|最后的;最终的;决赛
+find|找到;发现;认为
+fine|好的;精细的;罚款;晴朗的
+finger|手指
+finish|完成;结束;终点
+fire|火;火灾;射击;解雇
+firm|公司;牢固的;坚定的
+first|第一;首先;最初的
+fish|鱼;钓鱼
+fit|适合;合身;健康的
+fix|修理;固定;确定
+flag|旗帜;国旗
+flat|平的;公寓;平坦的
+flight|航班;飞行;逃走
+float|漂浮;浮动;彩车
+floor|地板;楼层;地面
+flow|流动;流量;涌出
+flower|花;开花
+fly|飞;飞行;苍蝇
+focus|焦点;集中;聚焦
+follow|跟随;遵循;接着
+food|食物;食品
+fool|傻瓜;愚弄
+foot|脚;英尺;底部
+football|足球;橄榄球
+force|力量;武力;强迫;部队
+foreign|外国的;外来的
+forest|森林;林区
+forget|忘记;遗忘
+forgive|原谅;宽恕
+form|形式;表格;形成;形状
+former|以前的;前者
+fortune|财富;运气;命运
+forward|向前;前进;向前地
+found|建立;创建;创办
+four|四
+frame|框架;相框;构架
+free|自由的;免费的;空闲的;释放
+freedom|自由;自在
+freeze|冻结;结冰;愣住
+fresh|新鲜的;清新的;新的
+friend|朋友;友人
+friendly|友好的;友善的
+friendship|友谊;友情
+from|从;来自;由于
+front|前面;正面;前面的
+fruit|水果;果实;成果
+full|满的;完全的;饱的
+fun|乐趣;有趣的;玩笑
+funny|有趣的;滑稽的;奇怪的
+furniture|家具
+future|未来;将来;未来的
+gain|获得;增加;收益;收获
+game|游戏;比赛;猎物
+gap|差距;缺口;间隔
+garden|花园;菜园
+gate|大门;闸门;登机口
+gather|聚集;收集;集合
+general|一般的;将军;总的
+gentle|温和的;温柔的;文雅的
+gentleman|绅士;先生
+get|得到;到达;变得;拿来
+gift|礼物;天赋;赠送
+girl|女孩;姑娘
+give|给;给予;付出;举办
+glad|高兴的;乐意的
+glass|玻璃;玻璃杯;眼镜
+global|全球的;总体的
+glove|手套
+goal|目标;球门;进球
+god|神;上帝;偶像
+gold|黄金;金色;金的
+golden|金色的;金黄色的;宝贵的
+good|好的;善良的;goods货物
+government|政府;内阁;治理
+grade|年级;成绩;等级;评分
+grain|谷物;颗粒;纹理
+grand|宏伟的;重大的;豪华的
+grandfather|祖父;外祖父
+grandmother|祖母;外祖母
+grass|草;草地;牧场
+great|伟大的;巨大的;很好的
+green|绿色的;绿色;青菜
+greet|问候;迎接;打招呼
+ground|地面;理由;场地;基础
+group|组;群;团体;分组
+grow|生长;成长;种植;变得
+growth|增长;生长;发展
+guard|守卫;保镖;警惕
+guess|猜测;猜想;认为
+guest|客人;宾客;旅客
+guide|指导;指南;导游;向导
+gun|枪;炮;喷射
+habit|习惯;习性
+half|一半;半数的
+hall|大厅;会堂;走廊
+hand|手;指针;帮助;交给
+handle|处理;把手;操纵
+hang|悬挂;吊;绞死
+happen|发生;碰巧;出现
+happy|快乐的;幸福的;满意的
+hard|困难的;硬的;努力地
+hardly|几乎不;简直不;刚刚
+harm|伤害;损害;危害
+hat|帽子
+hate|憎恨;讨厌;仇恨
+have|有;吃;经历;使
+head|头;首领;前往;朝向
+health|健康;卫生
+healthy|健康的;有益健康的
+hear|听见;听说;得知
+heart|心脏;内心;中心;爱心
+heat|热;加热;热度;压力
+heavy|重的;沉重的;大量的
+height|高度;身高;顶点
+hell|地狱;苦难;究竟
+help|帮助;助手;救命
+helpful|有帮助的;有益的
+hero|英雄;男主角
+hide|隐藏;躲藏;皮
+high|高的;高的;高尚的
+hill|小山;丘陵;坡
+history|历史;经历;履历
+hit|打击;击中;轰动;点击
+hold|握住;举行;容纳;认为
+hole|洞;孔;漏洞
+holiday|假日;节日;假期
+home|家;家乡;在家;国内的
+honest|诚实的;正直的
+honor|荣誉;尊敬;光荣
+hope|希望;期望
+horse|马
+hospital|医院
+hot|热的;辣的;性感的;热门的
+hotel|旅馆;酒店
+hour|小时;时刻
+house|房子;住宅;家庭
+however|然而;不过;无论如何
+huge|巨大的;庞大的
+human|人的;人类的;人类
+humor|幽默;风趣;幽默感
+hundred|百;一百
+hungry|饥饿的;渴望的
+hunt|打猎;搜寻;追捕
+hurry|匆忙;赶快;催促
+hurt|受伤;伤害;疼痛的
+husband|丈夫
+i|我(主格)
+ice|冰;冰淇淋;结冰
+idea|主意;想法;概念
+if|如果;是否
+ill|生病的;坏的;有害的
+imagine|想象;设想;猜想
+immediate|立即的;直接的
+important|重要的;重大的
+improve|改进;改善;提高
+in|在…里;进入;流行
+include|包括;包含;列入
+income|收入;收益
+increase|增加;增长;提高
+indeed|确实;的确;真正地
+industry|工业;行业;产业
+influence|影响;势力;感化
+inform|通知;告知;了解
+information|信息;资料;消息
+inside|在…里面;内部的;内部
+insist|坚持;坚决要求
+instead|代替;反而;而是
+instruct|指导;指示;吩咐
+instrument|乐器;仪器;工具
+interest|兴趣;利益;利息;使感兴趣
+interesting|有趣的;引人入胜的
+international|国际的;世界的
+interrupt|打断;中断;插嘴
+interview|面试;采访;访谈
+into|到…里;进入;成为
+introduce|介绍;引进;引入
+invention|发明;创造;虚构
+invite|邀请;请求;招致
+involve|涉及;牵涉;包含
+island|岛屿;岛
+issue|问题;议题;发行;发布
+it|它
+job|工作;职业;任务
+join|加入;连接;参加
+joke|笑话;玩笑;开玩笑
+journey|旅行;旅程;行程
+joy|欢乐;喜悦;乐趣
+judge|法官;裁判;判断;评价
+juice|果汁;汁液
+jump|跳;跳跃;猛增
+just|只是;刚才;恰好;公正的
+keep|保持;保存;继续;饲养
+key|钥匙;关键;键;关键的
+kick|踢;踢腿;反冲
+kid|小孩;开玩笑;欺骗
+kill|杀死;扼杀;消磨
+kind|种类;善良的;亲切的
+king|国王;君主
+kiss|亲吻;轻触
+kitchen|厨房
+knee|膝盖;膝部
+knife|刀;小刀
+knock|敲;敲击;碰撞
+know|知道;认识;懂得
+knowledge|知识;学问;了解
+lab|实验室;研究室
+labor|劳动;劳工;分娩
+lack|缺乏;缺少;不足
+lady|女士;夫人;小姐
+lake|湖;湖泊
+land|土地;陆地;着陆;登陆
+language|语言;措辞
+large|大的;大量的;广泛的
+last|最后的;持续;上一个;末尾
+late|迟的;晚的;已故的
+laugh|笑;嘲笑;笑声
+law|法律;规律;法则
+lay|放置;铺设;产卵;平放
+lazy|懒惰的;懒散的
+lead|领导;带领;导致;铅;线索
+leader|领导者;首领;领袖
+learn|学习;学会;得知
+least|最少;最小的;最不
+leave|离开;留下;请假;叶子
+lecture|讲座;讲课;教训
+left|左边;剩余的;离开的
+leg|腿;支柱;一段
+legal|合法的;法律的
+lend|借出;借给;提供
+length|长度;长短;期间
+less|更少;较少的;减去
+lesson|课;教训;课程
+let|让;允许;出租
+letter|信;字母;文字
+level|水平;级别;层次;平坦的
+library|图书馆;书房
+lie|躺;说谎;谎言;位于
+life|生活;生命;人生;一生
+lift|举起;电梯;提升;高兴起来
+light|光;灯;轻的;明亮的;点燃
+like|喜欢;像;如同;爱好
+limit|限制;限度;边界
+line|线;行;线路;排队;台词
+link|联系;链接;环节;连接
+list|列表;清单;列出;倾听
+listen|听;倾听;听从
+little|小的;少许;一点也不
+live|居住;生活;活的;实况的
+local|当地的;本地的;地方性的
+lock|锁;锁定;一绺头发
+lonely|孤独的;寂寞的;偏僻的
+long|长的;长时间;渴望
+look|看;看起来;外表;目光
+lose|失去;丢失;输掉;迷失
+loss|损失;失去;亏损
+lot|许多;大批;一块地
+loud|大声的;响亮的;喧闹的
+love|爱;热爱;喜爱;爱情
+lovely|可爱的;美好的;迷人的
+low|低的;矮的;低声的;沮丧的
+lucky|幸运的;吉祥的
+lunch|午餐;午饭
+machine|机器;机械;装置
+mad|发疯的;疯狂的;生气的
+magazine|杂志;期刊
+mail|邮件;邮政;邮寄
+main|主要的;最重要的
+major|主要的;专业的;主修;少校
+make|做;制造;使得;成为
+man|男人;人类;人
+manage|管理;经营;设法做到
+manager|经理;管理人
+manner|方式;态度;礼貌
+many|许多;多的
+map|地图;绘制地图
+march|三月;行军;前进;游行
+mark|标记;分数;痕迹;标志
+market|市场;集市;营销
+marry|结婚;嫁;娶
+master|主人;大师;掌握;硕士
+match|比赛;火柴;匹配;相配
+material|材料;物质;物质的;重要的
+matter|事情;物质;要紧;问题
+may|可以;可能;五月
+maybe|也许;可能;大概
+meal|一餐;膳食;饭
+mean|意思是;意味着;刻薄的;平均值
+meaning|意义;意思;含义
+measure|测量;措施;量度;程度
+meat|肉;肉类
+medical|医学的;医疗的
+medicine|药;医学;医药
+meet|遇见;会面;满足;迎接
+meeting|会议;会面;集会
+member|成员;会员;议员
+memory|记忆;记忆力;回忆
+mention|提到;说起;提及
+message|消息;信息;留言
+metal|金属;金属的
+method|方法;办法;条理
+middle|中间;中部;中间的
+might|可能;也许;力量
+mile|英里
+milk|牛奶;乳汁
+mind|头脑;精神;介意;注意
+mine|我的;矿;地雷;开采
+minute|分钟;分钟;微小的
+mirror|镜子;反映
+miss|想念;错过;小姐;未击中
+mistake|错误;误会;失误
+mix|混合;搅拌;混合物
+model|模型;模特;模范;型号
+modern|现代的;时髦的
+moment|片刻;瞬间;时刻
+money|钱;货币;财富
+month|月;月份
+moon|月亮;月球
+more|更多;更;额外的
+morning|早晨;上午
+most|最多;大多数;最
+mother|母亲;妈妈
+mountain|山;山脉
+mouse|老鼠;鼠标
+mouth|嘴;口;河口
+move|移动;搬动;感动;行动
+movement|运动;移动;活动;进展
+movie|电影
+much|许多;非常;大量
+murder|谋杀;凶杀;杀害
+music|音乐;乐曲
+must|必须;一定;必然
+my|我的
+name|名字;名称;命名;名声
+narrow|狭窄的;变窄;勉强地
+nation|国家;民族
+national|国家的;民族的
+nature|自然;本性;性质;大自然
+near|近的;在…附近;接近
+nearly|几乎;将近;差不多
+neat|整洁的;利落的;巧妙的
+necessary|必要的;必需的
+neck|脖子;颈部;领口
+need|需要;需求;必要
+negative|消极的;否定的;负的
+neighbor|邻居;邻国
+neither|两者都不;也不
+nervous|紧张的;神经的
+never|从不;决不;从未
+new|新的;崭新的;陌生的
+news|新闻;消息;报道
+newspaper|报纸;报社
+next|下一个;接下来;紧邻的
+nice|好的;漂亮的;和蔼的
+night|夜晚;夜间
+nine|九
+no|不;没有;拒绝
+nobody|没有人;无人
+nod|点头;打盹;点头同意
+noise|噪音;响声;喧闹声
+none|没有一个;毫无;都不
+nor|也不;也没有
+normal|正常的;普通的;常态
+north|北方;北方的;向北
+nose|鼻子;嗅觉
+note|笔记;便条;注意;音符
+nothing|没有什么;无事;无关紧要
+notice|注意;通知;公告;察觉
+novel|小说;新颖的
+now|现在;如今;立刻
+number|数字;号码;数量;编号
+nurse|护士;保姆;护理
+nut|坚果;螺母;疯子
+object|物体;目标;反对;宾语
+occur|发生;出现;想起
+ocean|海洋;大海
+of|…的;关于;来自
+off|离开;关闭;下班;远离
+offer|提供;提出;报价;提议
+office|办公室;办事处;职务
+officer|军官;官员;警官
+often|经常;常常
+oil|油;石油;加油
+old|老的;旧的;年老的;以前的
+on|在…上;关于;开着的;继续
+once|一次;曾经;一旦
+one|一;一个;一个人
+only|只有;唯一的;仅仅
+open|打开;开放的;开阔的;公开的
+operate|操作;运转;动手术;经营
+opinion|意见;看法;舆论
+opposite|相反的;对面的;对立面
+or|或者;否则;还是
+order|命令;订购;顺序;整理;订单
+ordinary|普通的;平凡的;平常的
+other|其他的;另一个;其余的人
+otherwise|否则;要不然;另外
+out|出去;在外;出现;不流行
+outside|在外面;外部;户外的
+over|结束;超过;在…上方;遍布
+own|自己的;拥有;承认
+owner|所有者;物主;业主
+pack|包装;打包;背包;一群
+page|页;页面;侍从
+pain|疼痛;痛苦;苦恼
+paint|油漆;绘画;涂料
+pair|一对;一双;一副
+palace|宫殿;皇宫
+pale|苍白的;暗淡的
+pan|平底锅;锅;盘子
+paper|纸;报纸;论文;文件
+parent|父母;家长;父/母
+park|公园;停车场;停放
+part|部分;角色;零件;分开
+particular|特别的;特定的;挑剔的
+party|聚会;政党;当事人
+pass|通过;传递;经过;及格
+passage|通道;段落;旅程
+passenger|乘客;旅客
+past|过去的;过去;经过的
+patient|病人;耐心的
+pause|暂停;停顿;踌躇
+pay|支付;付款;工资;付出
+peace|和平;平静;安宁
+pen|钢笔;围栏;围起来
+pencil|铅笔
+people|人们;人民;民族
+perfect|完美的;最佳的;使完美
+perform|表演;执行;履行
+perhaps|也许;可能;大概
+period|时期;一段时间;句号
+permit|允许;许可;许可证
+person|人;个人;人物
+personal|个人的;私人的;亲自的
+persuade|说服;劝说;使相信
+pet|宠物;宠儿
+phone|电话;打电话
+photo|照片;相片
+pick|挑选;采摘;拾起;镐
+picture|图片;照片;电影;描绘
+piece|块;片;件;作品
+pig|猪;猪肉
+pile|堆;堆积;大量
+pilot|飞行员;领航;试验的
+pink|粉红色;粉红的
+place|地方;放置;职位;名次
+plain|平原;朴素的;清楚的;普通的
+plan|计划;方案;打算;设计图
+plane|飞机;平面;刨子
+plant|植物;工厂;种植
+plastic|塑料;塑料的;可塑的
+plate|盘子;盘子;牌照;板块
+play|玩;播放;比赛;演出;剧本
+pleasant|令人愉快的;舒适的
+please|请;使高兴;满意
+pleasure|愉快;乐趣;快乐;荣幸
+plenty|大量;丰富;充足
+pocket|口袋;衣袋;零花钱
+point|点;要点;指向;目的;得分
+police|警察;警方
+polite|有礼貌的;文雅的
+poor|贫穷的;可怜的;差的
+popular|受欢迎的;流行的;大众的
+population|人口;全体居民
+port|港口;港口城市
+position|位置;职位;立场;姿势
+positive|积极的;肯定的;正面的
+possible|可能的;合理的
+post|邮寄;职位;帖子;岗位
+pot|锅;罐;壶;盆栽
+pound|磅;英镑;重击
+pour|倒;倾泻;涌出
+power|力量;权力;电力;能力
+practical|实际的;实用的;实践的
+practice|练习;实践;惯例
+praise|赞扬;表扬;称赞
+prepare|准备;预备;使做好准备
+present|现在的;礼物;呈现;出席的
+president|总统;校长;主席;总裁
+press|按;压;新闻界;出版社;压力机
+pressure|压力;压强;施加压力
+pretty|漂亮的;相当;可爱的
+prevent|阻止;预防;防止
+price|价格;代价;定价
+pride|骄傲;自豪;自尊
+primary|主要的;初级的;小学的
+print|打印;印刷;字体;照片
+prison|监狱;监禁
+private|私人的;私下的;私营的
+prize|奖品;奖赏;奖项
+probably|可能;大概;或许
+problem|问题;难题;麻烦
+produce|生产;制造;提出;农产品
+product|产品;产物;结果
+profession|职业;专业;行业
+professor|教授;专家
+program|节目;程序;计划;方案
+progress|进步;进展;前进
+promise|承诺;允诺;希望;预示
+pronounce|发音;宣布;宣称
+protect|保护;防护;保卫
+protection|保护;防护;保护措施
+proud|自豪的;骄傲的;自尊的
+prove|证明;证实;结果是
+provide|提供;供给;规定
+public|公共的;公开的;公众
+pull|拉;拖;拔;拉力
+punish|惩罚;处罚;责备
+pupil|学生;瞳孔
+purpose|目的;意图;用途
+push|推;推动;逼迫;按钮
+put|放;放置;表达;提出
+quality|质量;品质;特性;优质
+quantity|数量;量;数额
+quarter|四分之一;季度;一刻钟;地区
+queen|女王;王后;皇后
+question|问题;疑问;询问;质疑
+quick|快的;迅速的;敏捷的
+quiet|安静的;平静的;轻声的
+quite|相当;完全;十分
+race|赛跑;种族;竞争;急行
+radio|收音机;无线电
+rain|雨;下雨;雨水
+raise|提高;举起;筹集;抚养
+range|范围;山脉;射程;排列
+rank|等级;军衔;排名;列队
+rapid|迅速的;快速的;急流
+rather|相当;宁愿;而是
+reach|到达;伸手;达到;范围
+react|反应;回应;起反应
+read|读;阅读;看懂
+ready|准备好的;乐意的;现成的
+real|真实的;真正的;现实
+realize|意识到;实现;了解
+reason|原因;理由;理性;推理
+receive|收到;接到;接待;遭受
+recent|最近的;近来的
+recognize|认出;识别;承认;认可
+record|记录;唱片;档案;创纪录
+recover|恢复;康复;找回
+red|红色的;红色
+reduce|减少;降低;缩小
+refuse|拒绝;拒收;废物
+regard|认为;看待;尊敬;问候
+region|地区;区域;领域
+regret|后悔;遗憾;惋惜
+regular|规则的;定期的;经常的;普通的
+reject|拒绝;摒弃;驳回
+relate|联系;相关;讲述
+relation|关系;联系;亲属
+relax|放松;休息;松懈;缓和
+remain|保持;留下;剩余;仍然
+remember|记得;记住;想起
+remind|提醒;使想起
+remove|移除;去掉;搬迁
+repair|修理;修补;修复
+repeat|重复;重说;重做
+reply|回答;答复;回应
+report|报告;报道;汇报;举报
+represent|代表;象征;描绘
+request|请求;要求;点播
+require|需要;要求;命令
+research|研究;调查;探讨
+respect|尊重;尊敬;方面
+rest|休息;其余;剩余部分;静止
+restaurant|餐馆;饭店
+result|结果;成果;导致
+return|返回;归还;回报;退货
+review|复习;评论;审查;回顾
+rice|米饭;大米
+rich|富有的;丰富的;肥沃的
+ride|骑;乘坐;乘车
+right|右边;正确的;权利;立即
+ring|戒指;铃声;打电话;环形
+rise|上升;升起;上涨;兴起
+risk|风险;危险;冒险
+river|河;江
+road|路;道路;途径
+rock|岩石;摇滚乐;摇动
+role|角色;作用;任务
+roll|滚动;卷;名单;面包卷
+roof|屋顶;顶部
+room|房间;空间;余地
+root|根;根源;根基
+rose|玫瑰;上升的
+rough|粗糙的;粗略的;艰难的
+round|圆的;绕行;一轮;回合
+route|路线;路途;途径
+row|排;行;划船;争吵
+royal|王室的;皇家的;高贵的
+rub|擦;摩擦;按摩
+rule|规则;统治;规定;支配
+run|跑;运行;经营;竞选
+rush|冲;匆忙;急促;冲刺
+sad|悲伤的;难过的;糟糕的
+safe|安全的;保险箱;安然无恙的
+safety|安全;安全措施
+sail|航行;帆;驾船
+sale|销售;出售;拍卖;贱卖
+salt|盐;食盐;加盐
+same|相同的;同样的;一样
+sand|沙子;沙滩;打磨
+save|拯救;节省;保存;储蓄
+say|说;讲;表明;据说
+scene|场景;现场;场面;景色
+school|学校;上学;学派
+science|科学;学科;理科
+scientist|科学家
+sea|海;海洋;大量
+search|搜索;寻找;搜查
+season|季节;赛季;调味
+seat|座位;席位;就座
+second|第二;秒;第二名
+secret|秘密;秘诀;秘密的
+secretary|秘书;部长;书记
+section|部分;部门;章节;地区
+see|看见;明白;会见;目睹
+seed|种子;籽;播种
+seek|寻求;寻找;追求
+seem|似乎;好像;看起来
+select|选择;挑选;精选的
+self|自己;自我;本身
+sell|卖;销售;出售
+send|发送;派遣;寄;打发
+sense|感觉;意义;理智;感官
+sentence|句子;判决;判刑
+separate|分开;单独的;分离的
+serious|严肃的;严重的;认真的
+serve|服务;服役;上菜;供应
+service|服务;维修;服务机构
+set|设置;一套;放;集合;日落
+settle|解决;定居;安顿;沉淀
+seven|七
+several|几个;若干;数个
+shake|摇动;发抖;握手;震动
+shall|将要;应该
+shame|羞耻;羞愧;遗憾
+shape|形状;外形;塑造;身材
+share|分享;份额;股份;共用
+sharp|锋利的;尖锐的;急剧的;灵敏的
+she|她
+sheep|羊;绵羊
+shine|发光;照耀;擦亮;出色
+ship|船;轮船;运送
+shirt|衬衫;衬衣
+shock|震惊;休克;打击;使震惊
+shoe|鞋;鞋子
+shoot|射击;射门;拍摄;发射
+shop|商店;店铺;购物
+shore|海岸;海滨;岸边
+short|短的;矮的;短期的;缺乏的
+shot|射击;镜头;注射;尝试
+should|应该;应当;将会
+shoulder|肩膀;肩;承担
+shout|喊叫;呼喊;大声说
+show|显示;表演;展示;节目
+shut|关闭;关上;合拢
+sick|生病的;恶心的;厌倦的
+side|边;侧面;方面;团队
+sight|视力;景象;看见;名胜
+sign|标志;迹象;签名;手势
+signal|信号;标志;发信号
+silence|沉默;寂静;使安静
+silent|沉默的;寂静的;无声的
+silly|愚蠢的;傻的;无聊的
+silver|银;银色;银器;银的
+similar|相似的;类似的
+simple|简单的;朴素的;单纯的
+since|自从;因为;既然
+sing|唱;唱歌;鸣叫
+single|单一的;单身的;单个的;单程的
+sink|下沉;水槽;沉没;下降
+sir|先生;阁下
+sister|姐妹;姐姐;妹妹
+sit|坐;坐落;开会
+site|地点;网站;场地
+situation|情况;形势;处境
+six|六
+size|大小;尺寸;规模;尺码
+skill|技能;技巧;本领
+skin|皮肤;皮;外壳
+sky|天空;天
+sleep|睡觉;睡眠;入睡
+slide|滑动;滑坡;幻灯片
+slight|轻微的;细小的;略微的
+slip|滑倒;滑动;纸条;差错
+slow|慢的;缓慢的;减速
+small|小的;小规模的;不重要的
+smart|聪明的;时髦的;敏捷的
+smell|气味;闻;嗅觉;发臭
+smile|微笑;笑容
+smoke|烟;吸烟;冒烟
+smooth|光滑的;顺利的;弄平
+snow|雪;下雪
+so|所以;如此;那么
+social|社会的;社交的;群居的
+society|社会;社团;交往
+soft|软的;柔软的;温柔的
+soil|土壤;泥土;弄脏
+soldier|士兵;军人
+solution|解决方案;解答;溶液
+solve|解决;解答;破解
+some|一些;某些;大约
+somebody|某人;有人
+someone|某人;有人
+something|某事;某物;大约
+sometimes|有时;间或
+son|儿子
+song|歌曲;歌
+soon|很快;不久;马上
+sorry|对不起;遗憾的;抱歉的
+sort|种类;排序;分类;整理
+sound|声音;听起来;健全的
+south|南方;南方的;向南
+space|空间;太空;空地;空格
+speak|说话;讲;发言
+speaker|演讲者;扬声器;说话者
+special|特殊的;专门的;特别的
+speech|演讲;言语;说话
+speed|速度;迅速;加速
+spend|花费;度过;消耗
+spirit|精神;心灵;灵魂;烈酒
+spite|恶意;怨恨;尽管
+sport|运动;体育;娱乐
+spot|地点;斑点;认出;现场
+spread|传播;展开;蔓延;涂抹
+spring|春天;弹簧;泉水;跳跃
+square|广场;正方形;平方;公正的
+stage|舞台;阶段;举办
+stair|楼梯;阶梯
+stand|站立;忍受;立场;看台
+standard|标准;标准的;水准
+star|星星;明星;恒星;主演
+start|开始;出发;启动;开端
+state|国家;州;状态;声明
+station|车站;电台;站
+stay|停留;保持;逗留;借宿
+steal|偷;窃取;偷偷地做
+steam|蒸汽;水汽;蒸
+steel|钢;钢铁;钢材
+step|步骤;台阶;一步;踩踏
+stick|棍;粘住;坚持;伸出
+still|仍然;静止的;更;蒸馏器
+stone|石头;石材;果核
+stop|停止;车站;阻止;停留
+store|商店;储存;仓库
+storm|暴风雨;风暴;猛攻
+story|故事;小说;楼层;报道
+straight|直的;径直;坦率的
+strange|奇怪的;陌生的;不熟悉的
+stranger|陌生人;外地人
+street|街道;马路
+strength|力量;强度;长处
+stress|压力;强调;重音;紧张
+strict|严格的;严谨的;精确的
+strike|罢工;打击;撞击;突然想到
+string|线;弦;字符串;一串
+strong|强壮的;强大的;浓的;坚固的
+structure|结构;构造;建筑物
+struggle|斗争;努力;挣扎;奋斗
+student|学生;学员
+study|学习;研究;书房;研究论文
+stupid|愚蠢的;笨的;无聊的
+subject|主题;科目;主语;使服从
+succeed|成功;继承;接着发生
+success|成功;成就;胜利
+successful|成功的;有成就的
+such|这样的;如此的
+sudden|突然的;意外的
+suffer|遭受;受苦;忍受
+sugar|糖;食糖
+suggest|建议;暗示;表明
+suit|西装;适合;诉讼;花色
+summer|夏天;夏季
+sun|太阳;阳光;晒
+support|支持;支撑;供养;支援
+suppose|假设;认为;猜想
+sure|确信的;肯定的;当然
+surface|表面;表层;浮出水面
+surprise|惊奇;惊讶;使惊讶;突然袭击
+surround|包围;环绕;围绕
+sweet|甜的;可爱的;糖果
+swim|游泳;游动
+system|系统;体系;体制;制度
+table|桌子;表格;台子
+tail|尾巴;尾部;跟踪
+take|拿;取;花费;乘坐;接受;带走
+tale|故事;传说;讲述
+talk|谈话;交谈;演讲
+tall|高的;高大的
+tape|胶带;磁带;录像带
+task|任务;工作;作业
+taste|味道;品尝;品味;爱好
+tax|税;税收;征税
+tea|茶;茶叶
+teach|教;教导;讲授
+teacher|教师;老师
+team|团队;队伍;组
+tear|眼泪;撕;撕裂
+telephone|电话;打电话
+television|电视;电视机
+tell|告诉;讲述;分辨;吩咐
+temperature|温度;体温;气温
+ten|十
+temple|寺庙;神殿;太阳穴
+tend|倾向于;照料;易于
+tennis|网球
+terrible|可怕的;糟糕的;极坏的
+test|测试;试验;考试;检验
+text|文本;课文;发短信
+than|比;比较
+thank|感谢;谢谢
+that|那个;那;如此;引导从句
+the|这;那(定冠词)
+theater|剧院;电影院;戏剧
+their|他们的;她们的;它们的
+them|他们;她们;它们
+theme|主题;题目;主旋律
+themselves|他们自己;她们自己;它们自己
+then|然后;那时;那么
+theory|理论;学说;原理
+there|在那里;那里;有
+therefore|因此;所以
+these|这些
+they|他们;她们;它们
+thick|厚的;粗的;浓的;密集的
+thin|薄的;瘦的;稀疏的;稀的
+thing|东西;事情;事物
+think|想;认为;思考;考虑
+third|第三;三分之一
+thirty|三十
+this|这;这个;今
+those|那些
+though|虽然;尽管;然而
+thought|想法;思想;思考;认为
+thousand|千;一千
+threat|威胁;恐吓;凶兆
+three|三
+through|通过;穿过;透过;完成
+throw|扔;抛;投掷;摔倒
+thus|因此;从而;这样
+ticket|票;车票;罚单;入场券
+tide|潮汐;潮流;涨落
+tie|领带;系;打结;平局;连接
+tiger|老虎
+tight|紧的;牢固的;紧张的;紧身的
+till|直到;直至;耕种
+time|时间;次;时代;倍
+tiny|微小的;极小的
+tire|轮胎;使疲劳;厌倦
+tired|疲倦的;厌倦的
+title|标题;题目;头衔;所有权
+to|到;向;给;对
+today|今天;当今
+together|一起;共同;同时
+tomorrow|明天;未来
+tone|语气;音调;色调;基调
+tongue|舌头;语言;方言
+too|太;也;非常
+tool|工具;方法;手段
+tooth|牙齿
+top|顶部;顶端;最高的;上面
+topic|话题;主题;题目
+total|总的;总数;全部的;总计
+touch|触摸;接触;感动;联系
+tough|艰难的;强硬的;坚韧的
+toward|朝向;对于;将近
+town|城镇;小镇
+toy|玩具
+track|轨道;跑道;追踪;轨迹
+trade|贸易;交易;职业;交换
+tradition|传统;惯例
+traffic|交通;来往车辆
+train|火车;训练;培养
+training|训练;培训;锻炼
+translate|翻译;转化;转换
+travel|旅行;旅游;行进
+treat|对待;治疗;款待;处理
+tree|树;树木
+trend|趋势;潮流;倾向
+trick|把戏;诡计;诀窍;欺骗
+trip|旅行;绊倒;旅程;失误
+trouble|麻烦;困难;问题;打扰
+truck|卡车;货车
+true|真实的;正确的;忠诚的
+trust|信任;相信;委托
+truth|真相;事实;真理
+try|尝试;努力;审判;试用
+turn|转动;转变;轮流;转弯;轮到
+twelve|十二
+twenty|二十
+twice|两次;两倍
+two|二;两个
+type|类型;打字;种类
+uncle|叔叔;伯父;舅舅
+under|在…下面;低于;根据
+understand|理解;明白;懂得
+unit|单位;单元;部件
+unite|联合;团结;统一
+university|大学;高等学府
+unless|除非;如果不
+until|直到;到…为止
+up|向上;在上方;起来;上涨
+upon|在…上;在…之上
+upper|上面的;较高的;上层的
+upset|难过的;不安的;打翻;使心烦
+upstairs|楼上;在楼上
+us|我们
+use|使用;用途;利用;消耗
+used|用过的;习惯的;二手
+useful|有用的;有益的
+usual|通常的;惯例的;平常的
+usually|通常;经常
+vacation|假期;休假;度假
+valley|山谷;流域;峡谷
+value|价值;价值观;重视;估价
+various|各种各样的;不同的
+vegetable|蔬菜;植物
+very|非常;很;正是
+victory|胜利;成功
+view|观点;景色;观看;视图
+village|村庄;乡村
+visit|参观;拜访;访问
+visitor|访客;参观者
+voice|声音;嗓音;发表意见;语态
+vote|投票;表决;选举
+voyage|航行;航海;旅程
+wait|等待;等候;伺候
+wake|醒来;唤醒;叫醒
+walk|走;散步;步行
+wall|墙;墙壁;围墙
+want|想要;需要;缺少
+war|战争;斗争
+warm|温暖的;暖和的;热心的
+warn|警告;告诫;提醒
+wash|洗;洗涤;冲洗
+waste|浪费;废物;消耗
+watch|观看;手表;注视;监视
+water|水;浇水;水域
+wave|波浪;挥手;波动;浪潮
+way|方式;方法;路;方面
+we|我们
+weak|虚弱的;弱的;淡的
+wealth|财富;财产;丰富
+wear|穿;戴;磨损;疲乏
+weather|天气;气象
+web|网;网络;蜘蛛网
+wedding|婚礼;结婚
+week|星期;周
+weekend|周末
+weight|重量;体重;砝码
+welcome|欢迎;受欢迎的;款待
+well|好;井;健康的;很好地
+west|西方;西部;向西
+wet|湿的;下雨的;弄湿
+what|什么;多么;所…的事物
+whatever|无论什么;任何…的事物
+wheel|轮子;车轮;方向盘
+when|什么时候;当…时
+where|在哪里;何处
+whether|是否;不管;无论
+which|哪个;哪些;哪一个
+while|当…时;而;一会儿
+white|白色的;白色;白种人
+who|谁;…的人
+whole|整个的;全部的;整体
+whom|谁(宾格);…的人
+whose|谁的;某人的
+why|为什么;原因
+wide|宽的;广泛的;宽阔的
+wife|妻子;太太
+wild|野生的;狂野的;疯狂的
+will|将要;意愿;意志;遗嘱
+willing|乐意的;愿意的
+win|赢;获胜;赢得
+wind|风;缠绕;弯曲;上发条
+window|窗户;窗口
+wine|葡萄酒;酒
+wing|翅膀;翼;机翼;侧厅
+winner|胜利者;赢家
+winter|冬天;冬季
+wise|明智的;聪明的;英明的
+wish|希望;愿望;祝愿
+with|和;用;带有;随着
+within|在…之内;内部
+without|没有;缺乏;如果没有
+woman|女人;妇女
+wonder|想知道;惊奇;奇迹;奇观
+wonderful|精彩的;极好的;绝妙的
+wood|木头;木材;树林
+word|单词;词;话语;消息
+work|工作;作品;起作用;劳动
+worker|工人;工作者
+world|世界;领域;全世界
+worry|担心;忧虑;烦恼
+worse|更坏的;更糟的;更差
+worst|最坏的;最差的;最糟
+worth|值得的;价值
+would|将;会;愿意
+wound|伤口;伤害;受伤
+write|写;写信;写作
+writer|作家;作者
+wrong|错误的;不对的;坏事
+yard|院子;码(长度单位)
+year|年;年份;年度
+yes|是;是的;对
+yesterday|昨天;昨日
+yet|还;仍然;然而;尚未
+you|你;你们
+young|年轻的;幼小的;青年
+your|你的;你们的
+yourself|你自己;您自己
+zero|零;零点;没有
+zone|区域;地带;地带
+zoo|动物园
+look forward to|期待;盼望
+give up|放弃;停止
+take off|起飞;脱下;离开
+put on|穿上;戴上;上演
+get up|起床;起立
+wake up|醒来;叫醒
+come true|实现;成真
+grow up|长大;成长
+calm down|平静下来;镇静
+as soon as|一…就;尽快
+of course|当然;自然
+at once|立刻;马上
+in fact|事实上;实际上
+at least|至少;起码
+at most|至多;最多
+in order to|为了;以便
+so that|以便;因此;结果
+even if|即使;纵然
+as well as|以及;也;又
+instead of|代替;而不是
+according to|根据;按照
+because of|因为;由于
+a lot of|许多;大量的
+plenty of|大量的;充足的
+a little|一点儿;少量
+a few|几个;少数
+in front of|在…前面
+on time|准时;按时
+in time|及时;迟早
+by the way|顺便说一下;顺便问
+in a word|总之;一言以蔽之
+on the other hand|另一方面
+for example|例如;比如
+such as|例如;诸如
+first of all|首先;第一
+at the same time|同时;然而
+as a result|结果;因此
+in the end|最后;终于
+on the way|在路上;途中
+all over|到处;遍布;全部结束
+no matter|无论;不管
+a number of|许多;若干
+kind of|有点儿;稍微
+all right|好吧;没问题
+a great deal|大量;许多
+in trouble|处于困境;有麻烦
+out of|从…出来;出于;缺乏
+in order|按顺序;整齐
+on foot|步行;走路
+by heart|凭记忆;熟记
+in danger|处于危险中
+in public|公开地;当众
+after all|毕竟;终究
+at all|完全;根本;究竟
+above all|首先;尤其是
+as if|好像;仿佛
+as well|也;同样
+right now|立刻;现在
+just now|刚才;此刻
+once upon a time|从前;很久以前
+`,
+
+cn2en: `我|I;me;my
+你|you
+他|he;him
+她|she;her
+它|it
+我们|we;us;our
+你们|you (pl.)
+他们|they;them
+自己|oneself;self;own
+大家|everyone;all
+人们|people
+人|person;people;human
+男人|man
+女人|woman
+孩子|child;kid
+小孩|child;small child
+老人|old man;elder
+朋友|friend
+敌人|enemy
+家人|family member
+兄弟|brothers
+姐妹|sisters
+父亲|father
+母亲|mother
+爸爸|dad;father
+妈妈|mom;mother
+儿子|son
+女儿|daughter
+哥哥|elder brother
+弟弟|younger brother
+姐姐|elder sister
+妹妹|younger sister
+丈夫|husband
+妻子|wife
+夫妻|couple;husband and wife
+一家|a family;the whole family
+家里|at home;home
+家|home;family;house
+房间|room
+房子|house;building
+屋子|room;house
+门口|doorway;entrance
+面前|in front of;before
+身边|at one's side;beside
+旁边|beside;nearby
+附近|nearby;vicinity
+里面|inside
+外面|outside
+上面|above;on top
+下面|below;underneath
+前面|in front;ahead
+后面|behind;back
+中间|middle;center
+对面|opposite;across
+地方|place;spot
+城市|city
+城镇|town
+村庄|village
+乡村|countryside;village
+世界|world
+国家|country;nation
+天下|the world;under heaven
+朝廷|imperial court
+官府|government office
+皇宫|imperial palace
+京城|capital city
+路上|on the road;on the way
+道路|road;way
+街道|street
+路口|crossing;intersection
+角落|corner
+楼上|upstairs
+楼下|downstairs
+山上|on the mountain
+山下|at the foot of the mountain
+河边|riverside
+海边|seaside
+水中|in the water
+天上|in the sky
+山上|on the hill
+路|road;path;way
+桥|bridge
+河|river
+江|river (big);the Yangtze
+湖|lake
+海|sea;ocean
+山|mountain;hill
+山谷|valley
+森林|forest
+树林|woods;grove
+田野|field;open country
+土地|land;soil
+泥土|soil;mud
+石头|stone;rock
+沙子|sand
+天空|sky
+太阳|sun
+月亮|moon
+星星|star
+风|wind
+云|cloud
+雨|rain
+雪|snow
+雷|thunder
+闪电|lightning
+天气|weather
+温度|temperature
+火|fire
+水|water
+木头|wood
+树|tree
+花|flower
+草|grass
+叶子|leaf
+树枝|branch
+根|root
+果子|fruit
+种子|seed
+动物|animal
+野兽|wild beast
+老虎|tiger
+狮子|lion
+龙|dragon
+凤凰|phoenix
+鸟|bird
+鱼|fish
+蛇|snake
+狼|wolf
+狐狸|fox
+兔子|rabbit
+马|horse
+牛|ox;cow
+羊|sheep;goat
+狗|dog
+猫|cat
+鸡|chicken
+猪|pig
+虫子|worm;bug
+翅膀|wing
+尾巴|tail
+声音|voice;sound
+话|word;speech
+消息|news;message
+事情|matter;thing
+东西|thing;stuff
+问题|question;problem
+答案|answer
+方法|method;way
+办法|way;means
+原因|reason;cause
+结果|result;outcome
+目的|purpose;goal
+计划|plan
+主意|idea
+机会|chance;opportunity
+命运|fate;destiny
+运气|luck;fortune
+名字|name
+名字叫|called;named
+数字|number
+时间|time
+时候|time;moment
+现在|now;at present
+过去|past
+未来|future
+今天|today
+明天|tomorrow
+昨天|yesterday
+早上|morning
+中午|noon
+下午|afternoon
+晚上|evening;night
+夜里|at night
+白天|daytime
+一天|one day;a day
+一年|one year;a year
+一会儿|a while;a moment
+立刻|immediately;at once
+马上|right away;soon
+突然|suddenly
+慢慢|slowly
+渐渐|gradually
+终于|finally;at last
+已经|already
+正在|be doing
+曾经|once;ever
+开始|begin;start
+结束|end;finish
+继续|continue;go on
+准备|prepare;ready
+决定|decide;decision
+希望|hope;wish
+愿意|be willing
+能够|be able to;can
+知道|know
+明白|understand;realize
+理解|understand
+觉得|feel;think
+认为|think;believe
+想|think;want;miss
+想要|want
+喜欢|like;love
+爱|love
+恨|hate
+害怕|be afraid;fear
+担心|worry;be concerned
+放心|rest assured;don't worry
+高兴|happy;glad
+快乐|happy;joyful
+开心|happy;delighted
+生气|angry
+伤心|sad;heartbroken
+难过|sad;upset
+痛苦|pain;suffering
+烦恼|worry;annoyance
+惊讶|surprised;amazed
+吃惊|astonished;shocked
+奇怪|strange;odd
+怀疑|doubt;suspect
+相信|believe;trust
+信任|trust
+感谢|thank;grateful
+抱歉|sorry;apologize
+原谅|forgive;pardon
+帮助|help;assist
+照顾|take care of;look after
+保护|protect;guard
+支持|support
+反对|oppose;object
+答应|promise;agree
+拒绝|refuse;decline
+接受|accept
+告诉|tell;inform
+说话|speak;talk
+讲|speak;tell
+说|say;speak
+问|ask
+回答|answer;reply
+听到|hear
+看见|see;catch sight of
+看到|see;notice
+看|look;see;watch
+望|gaze;look far
+瞧|look
+观察|observe;watch
+发现|discover;find
+找到|find;locate
+寻找|search for;seek
+等待|wait for
+遇见|meet;encounter
+见面|meet;see each other
+躲开|dodge;avoid
+逃跑|run away;flee
+离开|leave;depart
+到达|arrive;reach
+回来|come back;return
+回去|go back;return
+进来|come in;enter
+出去|go out;exit
+上来|come up
+下去|go down;continue
+走|walk;go;leave
+跑|run
+跳|jump
+站|stand
+坐|sit
+躺|lie down
+爬|climb;crawl
+飞|fly
+游|swim
+来|come
+去|go
+到|arrive;reach;go to
+回|return;go back
+进|enter
+出|go out;come out
+上|go up;on;up
+下|go down;under;down
+开|open;drive;start
+关|close;shut;turn off
+打|hit;beat;fight;call
+杀|kill
+死|die;death
+活|live;alive
+生|birth;raw;life
+长|grow;long;elder
+吃|eat
+喝|drink
+睡觉|sleep
+醒来|wake up
+起床|get up
+休息|rest
+工作|work;job
+学习|study;learn
+读书|read books;study
+写字|write characters
+画画|draw;paint
+唱歌|sing
+跳舞|dance
+玩耍|play;have fun
+打架|fight
+争吵|quarrel;argue
+笑|laugh;smile
+微笑|smile
+哭|cry;weep
+喊|shout;yell
+叫|call;shout;be called
+点头|nod
+摇头|shake one's head
+抬头|raise one's head
+低头|lower one's head
+转身|turn around
+回头|turn back;look back
+伸手|reach out one's hand
+举起|raise;lift
+放下|put down
+拿起|pick up;take up
+抓住|catch;grab hold of
+放开|let go;release
+握|hold;grasp
+摸|touch;feel
+拍|pat;clap;shoot
+推|push
+拉|pull;drag
+抬|lift;raise
+搬|move;carry
+拿|take;hold;carry
+给|give
+送|send;give;escort
+得到|get;obtain
+失去|lose
+找到|find
+留下|leave behind;stay
+剩下|be left;remain
+用|use
+买|buy
+卖|sell
+做|do;make
+干|do;work
+制造|make;manufacture
+建造|build;construct
+写|write
+读|read
+记|remember;record
+忘记|forget
+记得|remember
+想念|miss;think of
+回忆|recall;reminisce
+遇见|encounter;come across
+选择|choose;choice
+需要|need;require
+应该|should;ought to
+可以|can;may;okay
+能够|be able to
+必须|must;have to
+可能|maybe;possibly;possible
+好|good;fine;well
+坏|bad;broken
+对|right;correct;toward
+错|wrong;mistake
+真|real;true;really
+假|false;fake
+大|big;large;great
+小|small;little
+多|many;much;more
+少|few;little;less
+高|tall;high
+矮|short (height)
+低|low
+长|long
+短|short
+宽|wide
+窄|narrow
+厚|thick
+薄|thin;flimsy
+深|deep
+浅|shallow;light (color)
+重|heavy;weight
+轻|light (weight)
+快|fast;quick
+慢|slow
+早|early
+晚|late
+新|new
+旧|old;used
+老|old;aged
+年轻|young
+漂亮|pretty;beautiful
+美丽|beautiful
+丑|ugly
+帅|handsome;cool
+聪明|clever;smart
+愚蠢|stupid;foolish
+勇敢|brave;courageous
+胆小|timid;cowardly
+善良|kind;good-hearted
+坏|evil;bad
+强|strong;powerful
+弱|weak
+厉害|formidable;fierce;impressive
+重要|important
+简单|simple;easy
+容易|easy
+困难|difficult;hard
+难|difficult;hard
+容易|easy
+安全|safe;safety
+危险|dangerous;danger
+干净|clean
+脏|dirty
+热|hot;heat
+冷|cold
+温|warm;temperature
+凉|cool;cold
+暖|warm
+饱|full (stomach)
+饿|hungry
+渴|thirsty
+累|tired
+困|sleepy
+疼|pain;ache;hurt
+痛|pain;ache
+病|ill;sick;illness
+药|medicine;drug
+伤|wound;injury;hurt
+身体|body;health
+眼睛|eyes
+耳朵|ears
+鼻子|nose
+嘴巴|mouth;face
+嘴|mouth
+脸|face
+头|head
+头发|hair
+手|hand
+脚|foot
+腿|leg
+胳膊|arm
+肩膀|shoulder
+心脏|heart
+心中|in the heart;in mind
+心里|in one's heart;in mind
+心中|in one's mind
+眼泪|tears
+泪水|tears
+汗|sweat
+血|blood
+骨头|bone
+皮肤|skin
+衣服|clothes;clothing
+裤子|trousers;pants
+鞋|shoes
+帽子|hat;cap
+口袋|pocket
+钱|money
+金币|gold coin
+银子|silver
+黄金|gold
+珠宝|jewelry;treasure
+宝贝|treasure;baby;darling
+宝物|treasure
+宝藏|treasure;hidden treasure
+食物|food
+饭|meal;rice;food
+菜|dish;vegetable
+肉|meat
+鱼|fish
+鸡蛋|egg
+牛奶|milk
+茶|tea
+酒|wine;alcohol
+水|water
+水果|fruit
+面包|bread
+点心|snack;dessert
+味道|taste;flavor
+香|fragrant;delicious smell
+甜|sweet
+苦|bitter
+酸|sour
+辣|spicy;hot
+咸|salty
+书|book
+本子|notebook
+信|letter
+纸|paper
+笔|pen;writing brush
+桌子|table;desk
+椅子|chair
+床|bed
+窗户|window
+门|door
+钥匙|key
+灯|lamp;light
+蜡烛|candle
+镜子|mirror
+刀|knife;blade
+剑|sword
+剑法|swordsmanship
+武器|weapon
+弓箭|bow and arrow
+箭|arrow
+盾|shield
+盔甲|armor
+衣服|clothes
+枪支|gun;firearm
+马车|carriage;cart
+船|boat;ship
+车子|vehicle;car
+国王|king
+皇帝|emperor
+皇后|empress;queen
+公主|princess
+王子|prince
+太子|crown prince
+大臣|minister;court official
+将军|general
+元帅|marshal;supreme commander
+士兵|soldier
+军队|army;troops
+百姓|common people
+人民|the people
+首领|leader;chief
+主人|master;host;owner
+仆人|servant
+奴隶|slave
+师傅|master;skilled worker;teacher
+徒弟|apprentice;disciple
+弟子|disciple;pupil
+门派|sect;school (martial arts)
+江湖|jianghu;the martial world
+武林|martial arts world
+修炼|cultivation;practice
+修行|cultivation;spiritual practice
+功法|martial art technique
+武功|martial arts;kung fu
+内力|internal energy
+灵气|spiritual energy
+法力|magical power
+法术|magic;spell
+魔法|magic;sorcery
+神仙|immortal;deity
+仙人|immortal;celestial being
+妖怪|monster;demon
+魔鬼|devil;demon
+鬼|ghost;spirit
+灵魂|soul;spirit
+神|god;deity
+佛|Buddha;buddhism
+魔|demon;devil
+道|way;Tao;road
+天|sky;heaven;day
+地|earth;ground
+人|person;people
+天地|heaven and earth
+世界|world
+宇宙|cosmos;universe
+自然|nature;natural
+万物|all things;everything
+生命|life
+死亡|death
+力量|power;strength;force
+气力|strength;energy
+体力|physical strength
+精神|spirit;energy;mental
+意志|will;determination
+信念|faith;belief
+理想|ideal;dream
+梦想|dream;aspiration
+希望|hope
+未来|future
+前途|future;prospects
+人生|life;one's life
+生活|life;living
+日子|days;life;date
+命运|fate;destiny
+福气|good fortune;blessing
+灾难|disaster;catastrophe
+危险|danger
+战争|war
+和平|peace
+战斗|battle;fight
+比武|martial arts contest
+比赛|competition;match;race
+胜负|victory or defeat
+胜利|victory;win
+失败|failure;defeat
+成功|success;succeed
+秘密|secret
+真相|truth;facts
+事实|fact;truth
+道理|reason;truth;principle
+规矩|rule;convention
+规则|rule;regulation
+习惯|habit;custom
+传统|tradition
+文化|culture
+语言|language
+文字|writing;script;characters
+汉语|Chinese (language)
+英语|English (language)
+双方|both sides;two parties
+别人|others;other people
+一个人|one person;alone
+一口气|one breath;in one go
+看起来|looks like;seems
+好像|seems;as if
+也许|maybe;perhaps
+应该|should;ought
+当然|of course
+可能|probably;maybe
+必须|must
+千万|must;be sure to
+千万个|tens of millions
+全部|all;entire
+所有|all;everything
+一些|some;a few
+许多|many;much;a lot
+很多|very many;a lot of
+很少|very few;rarely
+一点点|a tiny bit;just a little
+不少|quite a few;a lot
+任何|any;whatever
+随时|at any time
+到处|everywhere
+一直|always;all along
+从来|ever;always;never
+一向|all along;consistently
+再次|once more;again
+重新|again;anew;afresh
+另外|besides;in addition;another
+此外|in addition;besides
+而且|and;moreover
+但是|but;however
+可是|but;however
+所以|so;therefore
+因为|because
+如果|if
+假如|if;supposing
+虽然|although;though
+即使|even if
+除非|unless
+无论|no matter;regardless of
+只要|as long as;so long as
+只有|only;alone
+直到|until
+当|when;as
+而|and;while;whereas
+并|and;also (emphatic)
+都|all;both;even
+也|also;too
+还|still;also;yet
+又|again;also;moreover
+再|again;once more
+就|then;just;at once
+却|but;yet;however
+才|only then;just;barely
+已经|already
+刚刚|just now
+刚才|just now;a moment ago
+常常|often
+有时|sometimes
+偶尔|occasionally;once in a while
+每天|every day
+每年|every year
+这次|this time
+上次|last time
+下次|next time
+每|every;each
+各|each;every;various
+从|from;since;through
+向|toward;to;face
+往|toward;go
+朝|toward;facing;dynasty
+跟|with;follow;and
+和|and;with
+与|and;with
+同|same;with;together
+比|than;compare;ratio
+被|by (passive)
+把|(ba-construction);handle
+对|to;toward;for;correct
+为了|for;in order to
+关于|about;concerning
+根据|according to;based on
+按照|according to;in line with
+通过|through;via;by means of
+除了|except;besides
+包括|include;consist of
+其中|among;in which
+比如|for example;such as
+例如|for example
+等等|etc.;and so on
+总之|in short;in a word
+其实|actually;in fact
+原来|originally;it turns out
+居然|unexpectedly;actually
+竟然|unexpectedly;to one's surprise
+果然|as expected;indeed
+当然|of course;sure
+反正|anyway;in any case
+毕竟|after all
+究竟|after all;exactly;in the end
+到底|on earth;after all;to the end
+恐怕|I'm afraid;perhaps
+大概|about;roughly;probably
+大约|approximately;about
+几乎|almost;nearly
+至少|at least
+至多|at most
+不超过|not exceed;no more than
+超过|exceed;surpass
+不超过|no more than
+一致|consistent;unanimous
+一样|same;identical;alike
+不同|different
+一样|the same
+相似|similar
+相反|opposite;contrary
+本身|itself;oneself
+亲自|personally;in person
+互相|each other;mutually
+一起|together
+一块儿|together;in company
+独自|alone;by oneself
+单独|alone;separately
+突然|suddenly;abruptly
+慢慢|slowly;gradually
+匆匆|hurriedly;in a hurry
+连忙|hurriedly;promptly
+赶紧|hastily;quickly
+赶快|quickly;at once
+急忙|in a hurry;hurriedly
+悄悄|quietly;stealthily
+轻轻|gently;lightly
+静静|quietly;still
+好好|well;properly
+狠狠|severely;fiercely
+拼命|desperately;with all one's might
+努力|strive;work hard;effort
+认真|serious;earnest;conscientious
+仔细|careful;attentive
+小心|be careful;take care
+注意|pay attention;notice
+清楚|clear;distinct;understand
+明白|clear;understand;know
+的确|indeed;really
+真的|really;truly
+确定|certain;definite;confirm
+肯定|certain;definitely;affirm
+绝对|absolutely;definitely
+一定|certainly;must;surely
+也许|perhaps;maybe
+说不定|maybe;perhaps;hard to say
+不管|regardless;no matter
+随便|casual;any;as one pleases
+认真|earnest;serious
+确实|indeed;really;true
+竟然|unexpectedly;surprisingly
+居然|unexpectedly;actually
+总算|finally;at long last
+终于|finally;at last
+一直|continuously;always
+始终|from beginning to end;always
+永远|forever;always
+暂时|temporarily;for the time being
+眼前|before one's eyes;at present
+目前|at present;currently
+将来|in the future;future
+从前|in the past;once upon a time
+以前|before;previously
+以后|after;later
+之后|after;afterwards
+之前|before;prior to
+同时|at the same time;meanwhile
+另外|additionally;another
+到底|finally;after all;on earth
+不知所措|be at a loss;don't know what to do
+一般来说|generally speaking
+`,
+idioms: `一心一意|wholeheartedly;with one heart and mind;专心致志
+一针见血|hit the nail on the head;一针见血，直指要害
+一石二鸟|kill two birds with one stone
+一见钟情|love at first sight
+一鸣惊人|amaze the world with a single feat;一举成名
+一诺千金|a promise is weightier than gold;言出必行
+一清二楚|as clear as day;清清楚楚
+一目了然|be clear at a glance;一看就明白
+一帆风顺|smooth sailing;一切顺利
+一往无前|press forward with indomitable courage;勇往直前
+一马当先|take the lead;身先士卒
+一丝不苟|meticulous;with extreme care;毫不马虎
+一视同仁|treat all equally;不偏不倚
+一成不变|fixed and unchangeable;僵化不变
+一事无成|achieve nothing;一事无成
+一气呵成|do something in one breath;从头到尾不停顿
+一败涂地|suffer a crushing defeat;惨败
+一面之词|one-sided statement;片面之词
+一家之言|one's own view;独到之见
+入木三分|penetrating;刻画深刻
+人山人海|huge crowds of people;人非常多
+人云亦云|follow others blindly;随声附和
+九牛一毛|a drop in the bucket;微不足道
+三心二意|be of two minds;犹豫不决
+三言两语|in a few words;三言两语说清
+亡羊补牢|mend the fold after a sheep is lost;出了问题及时补救
+五颜六色|colorful;色彩繁多
+井井有条|in perfect order;条理分明
+从天而降|fall from the sky;突然出现
+天长地久|enduring as the universe;forever;永恒不变
+天翻地覆|earth-shaking;巨大变化
+心花怒放|burst with joy;高兴极了
+心急如焚|burning with anxiety;万分焦急
+心安理得|feel at ease and justified;问心无愧
+心甘情愿|be perfectly willing;发自内心愿意
+恍然大悟|suddenly realize the truth;茅塞顿开
+手忙脚乱|be in a flurry;慌乱无措
+手舞足蹈|dance for joy;高兴得手舞足蹈
+打草惊蛇|act rashly and alert the enemy;打草惊蛇，打草不捉蛇
+拔苗助长|spoil things by excessive enthusiasm;急于求成反坏事
+画蛇添足|ruin the effect by adding sth. superfluous;多此一举
+自以为是|be opinionated;自以为正确
+自相矛盾|contradict oneself;言行互相抵触
+虎头蛇尾|a tiger's head and a snake's tail;有始无终
+见多识广|experienced and knowledgeable;见识广博
+见义勇为|act bravely for a just cause;见到正义之事挺身而出
+目瞪口呆|dumbfounded;惊得说不出话
+狼吞虎咽|wolf down;吃相贪婪快速
+狐假虎威|bully people by flaunting one's powerful connections;仗势欺人
+画龙点睛|add the finishing touch;点睛之笔
+胸有成竹|have a well-thought-out plan;心中有数
+苦口婆心|advise earnestly and patiently;再三恳切劝告
+草木皆兵|mistake every bush for an enemy;风声鹤唳，疑神疑鬼
+视而不见|turn a blind eye to;装作没看见
+锦上添花|add brilliance to what is already beautiful;好上加好
+雪中送炭|provide timely help;危难中及时援助
+半途而废|give up halfway;做事有始无终
+守株待兔|wait for gains without hard work;心存侥幸
+对牛弹琴|cast pearls before swine;对不懂的人讲道理
+望梅止渴|quench thirst by thinking of plums;空想安慰自己
+乐不思蜀|be too happy to think of home;乐而忘返
+坐井观天|have a very narrow view;眼界狭小
+叶公好龙|profess love for what one actually fears;表面爱好实际惧怕
+掩耳盗铃|deceive oneself;自欺欺人
+朝三暮四|blow hot and cold;反复无常
+杯弓蛇影|be extremely suspicious;疑神疑鬼
+浑水摸鱼|fish in troubled waters;趁乱捞好处
+画饼充饥|feed on illusions;画饼充饥，空想安慰
+惊弓之鸟|a bird startled by the mere twang of a bowstring;受过惊吓，胆怯多疑
+杯水车薪|an utterly inadequate measure;力量太小无济于事
+缘木求鱼|do the impossible;方向方法错误
+病入膏肓|be past all cure;病情危重无法医治
+刻舟求剑|take measures without regard to change;墨守成规
+破釜沉舟|burn one's boats;下定决心，一拼到底
+背水一战|fight with one's back to the river;决一死战
+鞠躬尽瘁|bend one's back to the task until death;竭尽全力效劳
+卧薪尝胆|endure hardship to accomplish a goal;刻苦自励，发愤图强
+愚公移山|persistence will overcome any difficulty;不畏艰难坚持到底
+持之以恒|persevere in doing sth.;坚持下去
+水滴石穿|constant dropping wears away a stone;滴水穿石，坚持到底
+铁杵成针|perseverance will prevail;功夫不负有心人
+不耻下问|not feel ashamed to ask and learn from one's subordinates;谦虚好学
+温故知新|review the old to learn the new;温习旧知识获得新理解
+举一反三|draw inferences from one example;触类旁通
+融会贯通|achieve mastery through comprehensive study;透彻理解
+触类旁通|comprehend by analogy;由此及彼理解同类事物
+事半功倍|get twice the result with half the effort;效率极高
+事倍功半|get half the result with twice the effort;费力不讨好
+全力以赴|spare no effort;竭尽全力
+精益求精|strive for perfection;不断追求更好
+尽善尽美|perfect;extremely good
+独一无二|unique;unparalleled;唯一无二
+举世无双|matchless;世上独一无二
+少见多怪|ignorant people are easily surprised;见识少而大惊小怪
+习以为常|be used to sth.;成为习惯习见不怪
+屡见不鲜|common occurrence;见得多了不觉得新奇
+不计其数|countless;数也数不清
+数不胜数|too numerous to count;不计其数
+寥寥无几|very few;数量极少
+屈指可数|can be counted on one's fingers;数目很少
+应有尽有|have everything one could wish for;一应俱全
+一应俱全|complete in every detail;应有尽有
+完好无损|in perfect condition;完整无缺
+安然无恙|safe and sound;平安无事
+相安无事|live in peace with each other;彼此和睦无冲突
+国泰民安|the country is prosperous and the people at peace;天下太平
+安居乐业|live and work in peace;生活安定，乐于从事自己的职业
+丰衣足食|be well-fed and well-clothed;生活富足
+繁荣昌盛|thriving and prosperous;兴旺发达
+蒸蒸日上|flourishing more and more;日益发展向上
+欣欣向荣|flourishing;prospering;蓬勃发展
+日新月异|change with each passing day;发展迅速变化大
+突飞猛进|advance rapidly;进步神速
+一日千里|at a tremendous pace;进展极快
+平步青云|rapidly rise to fame;一朝发迹，官运亨通
+功成名就|achieve success and fame;功业建立，名声成就
+名扬四海|be known far and wide;声名远播
+声名鹊起|rise rapidly to fame;名声迅速提高
+家喻户晓|known to every household;人人皆知
+脍炙人口|win universal praise;诗文等受人喜爱传诵
+众所周知|as everyone knows;大家都知道
+显而易见|obviously;clearly evident;明摆着的事
+不言而喻|self-evident;无需多言
+一目十行|read ten lines at a glance;阅读速度极快
+走马观花|glance over things hurriedly;粗略地观察事物
+浮光掠影|skimming over the surface;印象不深
+浅尝辄止|stop after getting a little knowledge;稍微尝试就停止
+囫囵吞枣|swallow without chewing;不求甚解地笼统接受
+生吞活剥|copy mechanically without real understanding;机械照搬
+不求甚解|not seek deep understanding;读书只求懂得大意
+一知半解|have scanty knowledge;知道得不全面
+似懂非懂|not quite understand;好像懂又好像不懂
+若无其事|calm and indifferent;好像没那回事
+小心翼翼|with great care;非常谨慎小心
+糊里糊涂|muddleheaded;头脑不清楚
+乱七八糟|in a mess;杂乱无章
+干干净净|neat and clean;清洁干净
+清清楚楚|clear;distinct;十分清楚
+老老实实|honest;well-behaved;规规矩矩
+真真切切|real and vivid;真切确实
+一心为公|dedicated to the public interest;一心为大家
+忠心耿耿|loyal and devoted;忠诚不二
+赤胆忠心|utter devotion;绝对忠诚
+赴汤蹈火|go through fire and water;不畏艰险
+出生入死|risk one's life;冒生命危险
+舍己为人|sacrifice oneself for others;牺牲自己帮助别人
+救死扶伤|heal the wounded and rescue the dying;救人于危难
+助人为乐|find pleasure in helping others;乐于助人
+雪中送炭|timely assistance;危难时予以帮助
+趁火打劫|rob in the midst of a fire;趁人之危捞好处
+落井下石|hit a person when he is down;落井下石，乘人之危
+幸灾乐祸|take pleasure in others' misfortune;别人遭难反而高兴
+心狠手辣|cruel and ruthless;心肠狠毒手段毒辣
+心慈手软|softhearted;心肠仁慈下不了手
+目光短浅|short-sighted;缺乏长远眼光
+高瞻远瞩|far-sighted;站得高看得远
+深谋远虑|think deeply and plan carefully;考虑深远
+深思熟虑|think over carefully;反复深入思考
+当机立断|decide promptly and opportunely;抓住时机果断决定
+优柔寡断|irresolute;犹豫不决
+犹豫不决|hesitate;拿不定主意
+举棋不定|hesitate;下不了决心
+徘徊不前|hesitate and not move forward;止步不前
+急中生智|show resourcefulness in an emergency;危急时想出好办法
+灵机一动|hit upon a good idea;忽然想出好主意
+计上心来|an idea strikes one;计谋涌上心头
+将计就计|turn the tables on sb.;利用对方计策反制对方
+声东击西|make a feint to the east and attack in the west;虚张声势迷惑对方
+调虎离山|lure the tiger away from the mountain;引开对方主力
+瞒天过海|cross the sea by a trick;用欺骗手段瞒过对方
+顺手牵羊|pick up sth. on the sly;顺手拿走
+借刀杀人|kill sb. by another's hand;借他人之手害人
+过河拆桥|drop one's benefactor;忘恩负义
+卸磨杀驴|get rid of sb. after his service is done;过河拆桥
+恩将仇报|return evil for good;以怨报德
+以德报怨|return good for evil;用恩惠回报仇恨
+以牙还牙|tit for tat;针锋相对
+针锋相对|be diametrically opposed;互不相让
+旗鼓相当|be well-matched in strength;实力相当
+势均力敌|be evenly matched;力量不相上下
+不分胜负|end in a draw;分不出输赢
+不共戴天|absolutely irreconcilable;仇恨极深势不两立
+势不两立|mutually exclusive;不能共存
+你死我活|life-and-death struggle;斗争激烈
+刀光剑影|fierce fighting;刀剑闪光的激烈场面
+血雨腥风|bloody scenes;形容残酷屠杀
+尸横遍野|corpses strewn all over the field;尸体满地
+血流成河|bloodshed is great;形容伤亡惨重
+`,
+chars: `一|one;一;单
+二|two
+三|three
+四|four
+五|five
+六|six
+七|seven
+八|eight
+九|nine
+十|ten
+百|hundred
+千|thousand
+万|ten thousand
+人|person;people;人类
+入|enter;进入;收入
+大|big;large;巨大
+天|sky;heaven;day;天空
+地|earth;ground;大地
+土|soil;land;泥土
+山|mountain;山
+水|water;水流
+火|fire;火焰
+木|wood;tree;木头
+林|forest;树林
+森|dense forest;森林
+石|stone;rock;石头
+田|field;农田
+日|sun;day;太阳
+月|moon;month;月亮
+星|star;星星
+光|light;光线;光明
+明|bright;明白;明亮
+暗|dark;黑暗
+阴|shade;overcast;阴天;阴
+阳|sun;male;阳
+云|cloud;云彩
+风|wind;风采
+雨|rain;雨水
+雪|snow;雪
+雷|thunder;雷声
+电|electricity;闪电;电
+气|air;gas;生气;气息
+空|empty;sky;空气
+上|up;above;on;上面
+下|down;below;under;下面
+左|left;左边
+右|right;右边
+中|middle;center;中国
+内|inside;内部
+外|outside;外部
+前|front;before;前面
+后|back;behind;后面
+东|east;东方
+西|west;西方
+南|south;南方
+北|north;北方
+间|between;room;space;房间
+里|inside;within;里面
+门|door;gate;入口
+口|mouth;opening;人口
+窗|window;窗户
+户|door;household;户口
+房|house;room;房屋
+屋|house;room;屋顶
+家|home;family;家庭
+国|country;state;国家
+王|king;国王
+主|lord;master;main;主要
+子|son;child;名词后缀
+女|woman;female;女子
+男|man;male;男子
+老|old;aged;老人
+少|young;few;少年
+幼|young;childish;幼小
+年|year;年龄
+岁|year (of age);年岁
+时|time;hour;时间
+春|spring;春天
+夏|summer;夏天
+秋|autumn;秋天
+冬|winter;冬天
+早|morning;early;早上
+午|noon;中午
+晚|evening;late;晚上
+夜|night;夜晚
+今|today;now;今天
+明|bright;tomorrow;明亮
+昨|yesterday;昨天
+头|head;top;头部
+发|hair;send;头发
+面|face;noodles;surface;脸面
+眉|eyebrow;眉毛
+目|eye;目;条目
+眼|eye;眼睛
+耳|ear;耳朵
+鼻|nose;鼻子
+嘴|mouth;嘴巴
+牙|tooth;牙齿
+舌|tongue;舌头
+颈|neck;颈部
+肩|shoulder;肩膀
+背|back;后背
+腰|waist;腰部
+腹|belly;腹部
+心|heart;mind;内心
+手|hand;手工
+足|foot;sufficient;足够
+脚|foot;脚
+腿|leg;腿部
+身|body;身体
+骨|bone;骨头
+血|blood;血液
+皮|skin;leather;皮肤
+毛|hair;fur;眉毛/毛发
+魂|soul;灵魂
+鬼|ghost;鬼魂
+神|god;spirit;精神
+仙|immortal;仙人
+妖|demon;monster;妖怪
+魔|devil;magic;魔鬼
+佛|Buddha;佛教
+道|way;path;speak;道路;道理
+法|law;method;法术
+术|art;technique;武术
+武|martial;military;武功
+文|literature;civil;culture;文章
+书|book;write;书
+画|picture;draw;绘画
+字|character;word;文字
+言|word;speech;语言
+语|language;speech;语言
+说|say;speak;说话
+话|words;speech;话
+讲|speak;explain;讲解
+读|read;朗读
+写|write;书写
+听|listen;听见;听
+看|look;see;看
+见|see;meet;看见
+望|gaze;look;希望
+闻|smell;hear;新闻
+问|ask;询问
+答|answer;回答
+想|think;want;miss;想
+念|think of;read aloud;思念
+知|know;知识
+识|know;understand;认识
+记|remember;record;记录
+忘|forget;忘记
+意|meaning;intention;意思
+思|think;thought;思考
+爱|love;喜爱
+恨|hate;仇恨
+怕|fear;害怕
+惊|surprise;frighten;吃惊
+怒|anger;angry;愤怒
+喜|joy;like;喜欢
+乐|happy;music;快乐
+笑|laugh;smile;笑
+哭|cry;哭
+喊|shout;叫喊
+叫|call;shout;喊叫
+走|walk;go;走
+跑|run;跑
+跳|jump;跳
+飞|fly;飞
+游|swim;travel;游玩
+来|come;来
+去|go;去
+到|arrive;reach;到
+回|return;go back;回
+进|enter;go into;进
+出|go out;出
+开|open;start;开
+关|close;turn off;关
+停|stop;停留
+站|stand;station;站
+坐|sit;坐
+躺|lie;躺下
+吃|eat;吃
+喝|drink;喝
+睡|sleep;睡觉
+醒|wake;醒
+死|die;死
+生|born;life;生
+活|living;alive;生活
+动|move;action;动
+静|quiet;still;安静
+行|go;do;walk;行
+做|do;make;做
+用|use;用
+给|give;给
+拿|take;hold;拿
+打|hit;fight;play;打
+杀|kill;杀
+放|put;release;放
+取|take;get;获取
+找|look for;寻找
+有|have;there is;有
+无|without;no;没有
+在|at;be in;存在
+是|is;be;正确
+不|not;不
+很|very;很
+都|all;both;都
+也|also;too;也
+还|still;also;还
+就|just;then;就
+会|will;can;meeting;会
+能|can;able;能
+要|want;need;要
+好|good;well;好
+坏|bad;坏
+对|correct;pair;toward;对
+错|wrong;mistake;错
+真|true;real;真
+假|false;fake;假
+新|new;新
+旧|old;旧
+美|beautiful;美
+丑|ugly;丑
+强|strong;强
+弱|weak;弱
+多|many;more;多
+少|few;young;少
+高|tall;high;高
+低|low;低
+长|long;grow;长
+短|short;短
+快|fast;happy;快
+慢|slow;慢
+早|early;morning;早
+迟|late;迟
+远|far;远
+近|near;close;近
+深|deep;深
+浅|shallow;浅
+清|clear;clean;清楚
+白|white;white;白
+黑|black;黑
+红|red;红
+黄|yellow;黄
+蓝|blue;蓝
+绿|green;绿
+青|blue-green;青年;青
+紫|purple;紫
+灰|gray;灰
+衣|clothes;衣服
+服|clothes;serve;服从
+布|cloth;布料
+帽|hat;帽子
+鞋|shoes;鞋
+带|belt;bring;carry;带领
+包|bag;wrap;包含
+钱|money;钱
+金|gold;metal;金
+银|silver;银
+玉|jade;玉
+宝|treasure;宝物
+珠|pearl;bead;珠宝
+食|food;eat;食物
+饭|meal;rice;饭碗
+菜|vegetable;dish;菜肴
+肉|meat;肉
+酒|wine;酒
+茶|tea;茶叶
+米|rice;大米
+面|face;noodles;surface;面粉
+油|oil;油
+盐|salt;盐
+马|horse;马
+牛|ox;cow;牛
+羊|sheep;羊
+狗|dog;狗
+猫|cat;猫
+鸡|chicken;鸡
+猪|pig;猪
+鸟|bird;鸟
+鱼|fish;鱼
+虫|insect;虫子
+龙|dragon;龙
+虎|tiger;虎
+蛇|snake;蛇
+车|vehicle;car;车
+船|boat;ship;船
+路|road;way;道路
+桥|bridge;桥梁
+城|city;wall;城市
+村|village;村庄
+店|shop;store;商店
+街|street;街道
+房|house;room;房屋
+厅|hall;大厅
+楼|building;floor;楼房
+台|platform;stage;舞台
+床|bed;床
+桌|table;桌子
+椅|chair;椅子
+灯|lamp;light;灯火
+火|fire;火焰
+刀|knife;刀
+剑|sword;剑
+弓|bow;弓箭
+箭|arrow;箭
+盾|shield;盾牌
+军|army;军队
+兵|soldier;武器;兵
+将|general;will;带领
+战|war;fight;战斗
+争|contend;fight;争夺
+胜|win;victory;胜利
+败|defeat;fail;失败
+功|merit;achievement;功夫
+力|power;force;力量
+势|power;situation;形势
+气|air;spirit;生气
+灵|spirit;clever;灵敏
+仙|immortal;仙
+`,
+};
+
+
+/* ---------- 9. 语音朗读 TTSManager（浏览器原生 SpeechSynthesis 封装） ---------- */
+class TTSManager {
+  constructor() {
+    this.supported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+    this.voices = [];
+    this.rate = 1;
+    this.voice = null;      // 当前选择 voiceURI
+    this.queue = [];        // [{text, onstart, onend}]
+    this.cur = null;
+    this._onVoices = [];
+    if (this.supported) {
+      const load = () => {
+        this.voices = speechSynthesis.getVoices() || [];
+        for (const fn of this._onVoices) fn(this.voices);
+      };
+      load();
+      speechSynthesis.addEventListener && speechSynthesis.addEventListener('voiceschanged', load);
+    }
+  }
+  onVoices(fn) {
+    this._onVoices.push(fn);
+    if (this.voices.length) fn(this.voices);
+  }
+  setRate(r) { this.rate = clampNum(r, 0.5, 2); }
+  setVoice(uri) { this.voice = this.voices.find(v => v.voiceURI === uri) || this.voices.find(v => v.lang && v.lang.toLowerCase().startsWith('zh')) || null; }
+
+  enqueue(text, opts = {}) {
+    text = String(text).trim();
+    if (!text) { opts.onend && opts.onend(); return; }
+    this.queue.push({ text, onstart: opts.onstart, onend: opts.onend });
+    this._pump();
+  }
+  _pump() {
+    if (!this.supported) { this.queue = []; return; }
+    if (this.cur || this.queue.length === 0) return;
+    const item = this.queue.shift();
+    const u = new SpeechSynthesisUtterance(item.text);
+    u.rate = this.rate;
+    u.voice = this.voice || null;
+    u.lang = u.voice ? u.voice.lang : (this._langFor(item.text) === 'cn' ? 'zh-CN' : 'en-US');
+    const done = () => { this.cur = null; item.onend && item.onend(); this._pump(); };
+    u.onstart = () => item.onstart && item.onstart();
+    u.onend = done;
+    u.onerror = (e) => { console.warn('TTS error', e.error); done(); };
+    this.cur = u;
+    // 部分浏览器长句 15 秒会被掐断: 入队前已按句切分, 这里再防抖一下
+    try { speechSynthesis.speak(u); } catch (e) { done(); }
+  }
+  _langFor(text) { return DictionaryService.detectLang(text); }
+  stop() {
+    if (!this.supported) return;
+    this.queue = [];
+    this.cur = null;
+    speechSynthesis.cancel();
+  }
+  pause() { if (this.supported) speechSynthesis.pause(); }
+  resume() { if (this.supported) speechSynthesis.resume(); }
+  get speaking() { return this.supported && (this.cur != null || this.queue.length > 0 || speechSynthesis.speaking); }
+  /** 朗读单段文本（供划词朗读等使用） */
+  speakOnce(text, rate, voiceURI, onend) {
+    this.setRate(rate); this.setVoice(voiceURI);
+    this.enqueue(text, { onend });
+  }
+}
+function clampNum(n, a, b) { return Math.min(b, Math.max(a, n)); }
+
+/* ---------- 10. 排版引擎：断行 + 分页（测量式分页，异步不阻塞 UI） ---------- */
+/**
+ * LineBreaker: 用 canvas.measureText 按真实宽度断行（中文按字符、英文按单词边界）
+ */
+class LineBreaker {
+  constructor() {
+    this.canvas = document.createElement('canvas');
+    this.ctx = this.canvas.getContext ? this.canvas.getContext('2d') : null;
+    this._measureCache = new Map(); // 缓存 "font|text" → 宽度（上限控制）
+    this._cacheMax = 60000;
+  }
+  fontString(fontSize, family) { return `${fontSize}px ${family}`; }
+  measure(text, font) {
+    if (!this.ctx) return null; // 无 canvas 时返回 null → 走估算
+    const key = font + '|' + text;
+    let w = this._measureCache.get(key);
+    if (w == null) {
+      this.ctx.font = font;
+      w = this.ctx.measureText(text).width;
+      if (this._measureCache.size >= this._cacheMax) this._measureCache.clear();
+      this._measureCache.set(key, w);
+    }
+    return w;
+  }
+  /** 估算宽度（无 canvas 兜底）：CJK≈1em, ASCII≈0.55em */
+  estimate(text, fontSize) {
+    let w = 0;
+    for (const ch of text) {
+      w += /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? fontSize : fontSize * 0.55;
+    }
+    return w;
+  }
+  /** 20ms 时间片内让出主线程（异步编程：大章节分页不卡 UI） */
+  static async yield() {
+    await new Promise(r => setTimeout(r, 0));
+  }
+  /** 二分查找: 在 [start,len] 内找最大可容纳的断点（≤ maxW） */
+  _findBreak(text, start, maxW, font, fontSize) {
+    let lo = start + 1;
+    let hi = text.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      const w = this.measure(text.slice(start, mid), font) ?? this.estimate(text.slice(start, mid), fontSize);
+      if (w <= maxW) lo = mid; else hi = mid - 1;
+    }
+    if (lo === start) lo = Math.min(text.length, start + Math.max(1, Math.floor(maxW / fontSize)));
+    return lo;
+  }
+
+  /** 返回行区间数组 [[s,e], ...]（每 80 行让出一次主线程） */
+  async breakLines(text, maxW, font, fontSize) {
+    const lines = [];
+    let start = 0;
+    let count = 0;
+    while (start < text.length) {
+      const end = this._findBreak(text, start, maxW, font, fontSize);
+      lines.push([start, end]);
+      start = end;
+      count++;
+      if (count % 80 === 0) await LineBreaker.yield();
+    }
+    return lines;
+  }
+}
+
+/**
+ * ChapterPager: 把一章的段落排成“页”。
+ * 页内数据: { lines: [{p, s, e}], startChar, endChar }
+ *  - p: 段落下标  s/e: 该段落内的字符区间（跨页可拆分）
+ */
+class ChapterPager {
+  constructor({ pageW, pageH, vPad, fontSize, lineHeight, fontFamily, breaker }) {
+    this.pageW = pageW; this.pageH = pageH; this.vPad = vPad;
+    this.fontSize = fontSize; this.lineHeight = lineHeight;
+    this.fontFamily = fontFamily;
+    this.breaker = breaker;
+    this.font = breaker.fontString(fontSize, fontFamily);
+    this.lineH = Math.round(fontSize * lineHeight);
+    this.availH = Math.max(60, pageH - vPad * 2);
+    this.maxLines = Math.max(1, Math.floor(this.availH / this.lineH));
+  }
+
+  async paginate(paras) {
+    const pages = [];
+    let group = [];          // 正在填充的页
+    let groupStartChar = 0;
+    let groupChars = 0;
+    let charTotal = 0;       // 已排入行的章节字符数（供 percent 用）
+    const flush = () => {
+      if (!group.length) return;
+      pages.push({
+        lines: group.slice(),
+        startChar: groupStartChar,
+        endChar: groupStartChar + groupChars,
+      });
+      group = [];
+      groupChars = 0;
+    };
+    let lineCount = 0;
+    const maxW = Math.max(80, this.pageW); // pageW 已扣除内边距
+
+    for (let p = 0; p < paras.length; p++) {
+      const text = paras[p];
+      if (!text) continue;
+      if (group.length === 0) groupStartChar = charTotal;
+      let paraLines = [];
+      try {
+        paraLines = await this.breaker.breakLines(text, maxW, this.font, this.fontSize);
+      } catch (e) {
+        // 极端情况兜底：整段作为一行
+        paraLines = [[0, text.length]];
+      }
+      for (const [s, e] of paraLines) {
+        if (group.length >= this.maxLines) flush();
+        if (group.length === 0) groupStartChar = charTotal;
+        group.push({ p, s, e });
+        groupChars += e - s;
+        charTotal += e - s;
+        lineCount++;
+      }
+    }
+    flush();
+
+    // 最后一页过短时并入前一页（避免孤行）
+    if (pages.length > 1) {
+      const last = pages[pages.length - 1];
+      if (last.lines.length <= 2) {
+        const prev = pages[pages.length - 2];
+        prev.lines.push(...last.lines);
+        prev.endChar = last.endChar;
+        pages.pop();
+      }
+    }
+
+    const charCount = paras.reduce((n, t) => n + t.length, 0);
+    return { pages, charCount, lineCount };
+  }
+}
+
+/* ---------- 11. 阅读控制器 Reader ---------- */
+class Reader {
+  constructor(bus) {
+    this.bus = bus;
+    this.breaker = new LineBreaker();
+    this.book = null;
+    this.chapters = null;          // [{index,title,paras,chars}]
+    this.chapterIndex = -1;
+    this.pageIndex = -1;
+    this._pagesCache = new Map();  // chapterIndex -> {pages, charCount, pagerCtx}
+    this._metrics = null;
+    this.reading = false;
+    this.readingMode = 'page';     // page: 页级连续朗读
+    this.hotZonesOn = true;
+
+    this.el = {
+      root: $('#reader'),
+      empty: $('#reader-empty'),
+      title: $('#rt-title'),
+      pageLabel: $('#rt-page'),
+      percent: $('#rt-percent'),
+      content: $('#page-content'),
+      ttsPlay: $('#tts-play'),
+      ttsStop: $('#tts-stop'),
+      btnPrev: $('#btn-page-prev'),
+      btnNext: $('#btn-page-next'),
+      chapPrev: $('#btn-chap-prev'),
+      chapNext: $('#btn-chap-next'),
+      toc: $('#btn-toc'),
+    };
+    this.tts = new TTSManager();
+    this.savePos = debounce(() => this._persistPosition(), 500);
+    this._bindUI();
+  }
+
+  /* ---------- 打开 / 关闭 ---------- */
+  async openBook(book) {
+    this.stopReading();
+    this.book = book;
+    this.chapters = await this.data.loadChapters(book.id);
+    this._pagesCache.clear();
+    this.el.root.classList.add('show');
+    this.el.empty.style.display = 'none';
+    this.el.title.textContent = book.title || I18N.t('untitled');
+    this.bus.emit('books:changed');
+    // 等待一帧让布局生效后再测量分页
+    await new Promise(r => requestAnimationFrame(() => r()));
+    await new Promise(r => requestAnimationFrame(() => r()));
+    this._refreshMetrics();
+    // 恢复上次阅读位置
+    const pos = await this.data.getPosition(book.id);
+    if (pos && pos.chapterIndex < this.chapters.length) {
+      const prefix = this._prefixChars(pos.chapterIndex);
+      await this.gotoChapter(pos.chapterIndex, -1, pos.charOffset != null ? pos.charOffset - prefix : -1);
+    } else {
+      await this.gotoChapter(0, 0);
+    }
+    this.bus.emit('reader:open', { book });
+  }
+
+  closeBook() {
+    this.stopReading();
+    this.book = null;
+    this.chapters = null;
+    this.el.root.classList.remove('show');
+    this.el.empty.style.display = '';
+    this.bus.emit('reader:close');
+  }
+
+  /* ---------- 度量与排版 ---------- */
+  _refreshMetrics() {
+    const content = this.el.content;
+    const cs = getComputedStyle(content);
+    const padL = parseFloat(cs.paddingLeft) || 0;
+    const padR = parseFloat(cs.paddingRight) || 0;
+    const padT = parseFloat(cs.paddingTop) || 0;
+    const padB = parseFloat(cs.paddingBottom) || 0;
+    this._metrics = {
+      pageW: content.clientWidth - padL - padR,
+      pageH: content.clientHeight - padT - padB,
+    };
+  }
+
+  _pagerFor() {
+    const s = this.settings;
+    return new ChapterPager({
+      pageW: Math.max(200, this._metrics.pageW),
+      pageH: Math.max(200, this._metrics.pageH),
+      vPad: 20,
+      fontSize: s.fontSize,
+      lineHeight: s.lineHeight,
+      fontFamily: s.fontFamily,
+      breaker: this.breaker,
+    });
+  }
+
+  async _ensurePages(chapterIndex) {
+    if (this._pagesCache.has(chapterIndex)) return this._pagesCache.get(chapterIndex);
+    const chapter = this.chapters[chapterIndex];
+    const result = await this._pagerFor().paginate(chapter.paras);
+    this._pagesCache.set(chapterIndex, result);
+    // 只保留最近 3 章的分页缓存，防止内存膨胀
+    if (this._pagesCache.size > 3) {
+      for (const key of this._pagesCache.keys()) {
+        if (key !== this.chapterIndex && key !== this.chapterIndex + 1 && key !== this.chapterIndex - 1) {
+          this._pagesCache.delete(key);
+        }
+      }
+    }
+    return result;
+  }
+
+  _prefixChars(chapterIndex) {
+    let n = 0;
+    const chars = this.book.chapterChars || [];
+    for (let i = 0; i < chapterIndex && i < chars.length; i++) n += chars[i] || 0;
+    return n;
+  }
+  get _totalChars() { return this.book.totalChars || this.book.chapterChars.reduce((n, c) => n + c, 0) || 1; }
+
+  /* ---------- 导航 ---------- */
+  async gotoChapter(index, pageIndex = 0, charOffsetInChapter = -1) {
+    if (!this.chapters || !this.chapters.length) return;
+    index = clampNum(index, 0, this.chapters.length - 1);
+    this.chapterIndex = index;
+    this.el.title.textContent = this.book.title + ' · ' + (this.chapters[index].title || '');
+    const { pages } = await this._ensurePages(index);
+    let target = 0;
+    if (pageIndex >= 0 && pageIndex < pages.length) {
+      target = pageIndex;
+    } else if (charOffsetInChapter >= 0 && pages.length > 1) {
+      target = this._pageForCharOffset(pages, charOffsetInChapter);
+    }
+    this.pageIndex = target;
+    this._render();
+    this._afterNav();
+  }
+
+  _pageForCharOffset(pages, offset) {
+    let best = 0;
+    for (let i = 0; i < pages.length; i++) {
+      if (pages[i].startChar <= offset) best = i; else break;
+    }
+    return best;
+  }
+
+  async nextPage() {
+    if (!this.book) return;
+    const { pages } = await this._ensurePages(this.chapterIndex);
+    if (this.pageIndex < pages.length - 1) { this.pageIndex++; this._render(); this._afterNav(); }
+    else if (this.chapterIndex < this.chapters.length - 1) { await this.gotoChapter(this.chapterIndex + 1, 0); }
+    else { toast(I18N.t('lastPage')); }
+  }
+  async prevPage() {
+    if (!this.book) return;
+    if (this.pageIndex > 0) { this.pageIndex--; this._render(); this._afterNav(); }
+    else if (this.chapterIndex > 0) {
+      const { pages } = await this._ensurePages(this.chapterIndex - 1);
+      await this.gotoChapter(this.chapterIndex - 1, pages.length - 1);
+    } else { toast(I18N.t('firstPage')); }
+  }
+  async nextChapter() {
+    if (this.chapterIndex < this.chapters.length - 1) await this.gotoChapter(this.chapterIndex + 1, 0);
+    else toast(I18N.t('lastChapter'));
+  }
+  async prevChapter() {
+    if (this.chapterIndex > 0) await this.gotoChapter(this.chapterIndex - 1, 0);
+    else toast(I18N.t('firstChapter'));
+  }
+
+  /* 按全书百分比跳转（0~1） */
+  async gotoPercent(p) {
+    const chars = this.book.chapterChars || [];
+    let target = Math.round(p * this._totalChars);
+    let ci = 0;
+    for (let i = 0; i < chars.length; i++) {
+      if (target <= chars[i]) { ci = i; break; }
+      target -= chars[i];
+      ci = i + 1;
+    }
+    ci = clampNum(ci, 0, this.chapters.length - 1);
+    await this.gotoChapter(ci, -1, target);
+  }
+
+  /* ---------- 渲染 ---------- */
+  _render() {
+    const chapter = this.chapters[this.chapterIndex];
+    if (!chapter) return;
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+    const page = pages[this.pageIndex] || pages[0];
+    const root = this.el.content;
+    root.textContent = '';
+    if (!page) return;
+    const frag = document.createDocumentFragment();
+    let cur = null;
+    for (let li = 0; li < page.lines.length; li++) {
+      const ln = page.lines[li];
+      const text = chapter.paras[ln.p].slice(ln.s, ln.e);
+      if (!cur || cur.p !== ln.p) {
+        cur = { p: ln.p };
+        const el = document.createElement('p');
+        el.className = 'para';
+        el.dataset.p = ln.p; el.dataset.s = ln.s; el.dataset.e = ln.e;
+        el.textContent = text;
+        frag.appendChild(el);
+      } else {
+        const el = frag.lastElementChild;
+        el.dataset.e = ln.e;
+        el.textContent += text;
+      }
+    }
+    root.appendChild(frag);
+    // 中间过渡段落（跨页段落在上/下页有接续）给出更紧凑间距
+    this._tightenBoundaryParas(page);
+  }
+
+  /** 跨页段落首行/末行排版微调（可读性） */
+  _tightenBoundaryParas(page) {
+    const els = this.el.content.querySelectorAll('.para');
+    for (const el of els) {
+      const p = +el.dataset.p;
+      const len = this.chapters[this.chapterIndex].paras[p].length;
+      const fullStart = +el.dataset.s === 0;
+      const fullEnd = +el.dataset.e >= len;
+      if (!fullStart || !fullEnd) el.classList.add('tight');
+    }
+  }
+
+  _currentBookPercent() {
+    const prefix = this._prefixChars(this.chapterIndex);
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [{ startChar: 0 }] };
+    const page = pages[this.pageIndex] || pages[0];
+    return clampNum((prefix + page.startChar) / Math.max(1, this._totalChars), 0, 1);
+  }
+
+  _afterNav() {
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+    this.el.pageLabel.textContent = `${this.pageIndex + 1} / ${pages.length || 1}`;
+    const p = this._currentBookPercent();
+    this.el.percent.textContent = Math.round(p * 100) + '%';
+    this.bus.emit('reader:page', {
+      bookId: this.book.id,
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      percent: p,
+      title: this.chapters[this.chapterIndex].title,
+    });
+    this.savePos();
+  }
+
+  _persistPosition() {
+    if (!this.book) return;
+    const prefix = this._prefixChars(this.chapterIndex);
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [{ startChar: 0 }] };
+    const page = pages[this.pageIndex] || pages[0];
+    const percent = this._currentBookPercent();
+    this.data.savePosition({
+      bookId: this.book.id,
+      chapterIndex: this.chapterIndex,
+      pageIndex: this.pageIndex,
+      percent,
+      charOffset: prefix + page.startChar,
+    });
+  }
+
+  /* ---------- 设置应用 ---------- */
+  applySettings(settings) {
+    this.settings = settings;
+    const content = this.el.content;
+    content.style.setProperty('--font-size', settings.fontSize + 'px');
+    content.style.setProperty('--reader-line-height', settings.lineHeight);
+    content.style.fontFamily =
+      settings.fontFamily === 'kai' ? '"KaiTi","STKaiti","Kaiti SC",serif' :
+      settings.fontFamily === 'sans' ? '"PingFang SC","Microsoft YaHei",sans-serif' :
+      '"Songti SC","Noto Serif CJK SC","SimSun",serif';
+    content.style.width = settings.pageWidth + '%';
+    content.classList.toggle('no-indent', !settings.indent);
+    this.hotZonesOn = !!settings.hitZone;
+    this.tts.setRate(settings.ttsRate);
+    this.tts.setVoice(settings.ttsVoice);
+    if (this.book && this._metrics) {
+      this._refreshMetrics();
+      // 重新分页并按字符偏移恢复位置
+      const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+      const page = pages[this.pageIndex] || pages[0];
+      const posOffset = page ? page.startChar : 0;
+      this._pagesCache.clear();
+      this.gotoChapter(this.chapterIndex, -1, posOffset);
+    }
+  }
+
+  /* ---------- 划词 ---------- */
+  /** 由 App 注入: (text, type /* 'translate'|'explain'|'speak'|'copy' *\/) => void */
+  onSelectionAction = null;
+
+  /* ---------- TTS 朗读 ---------- */
+  startReading() {
+    if (!this.settings) return;
+    if (!this.tts.supported) { toast(I18N.t('noTts'), true); return; }
+    this.stopReading();
+    this.reading = true;
+    this._syncTtsUI();
+    this._readCurrentPage();
+  }
+  stopReading() {
+    this.reading = false;
+    this.tts.stop();
+    this.el.content.querySelectorAll('.para-tts').forEach(el => el.classList.remove('para-tts'));
+    this._syncTtsUI();
+  }
+  _syncTtsUI() {
+    this.el.ttsPlay.textContent = this.reading ? '⏹' : '▶';
+    this.el.ttsStop.disabled = !this.reading;
+    this.bus.emit('tts:state', { reading: this.reading });
+  }
+
+  async _readCurrentPage() {
+    const chapter = this.chapters[this.chapterIndex];
+    const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
+    const page = pages[this.pageIndex];
+    if (!page) return this.stopReading();
+    // 合并本页段落（跨页段落只读本页部分）
+    const groups = [];
+    for (const ln of page.lines) {
+      const last = groups[groups.length - 1];
+      const text = chapter.paras[ln.p].slice(ln.s, ln.e);
+      if (last && last.p === ln.p) last.text += text;
+      else groups.push({ p: ln.p, text });
+    }
+    for (const g of groups) {
+      if (!this.reading) return;
+      const sentences = splitSentences(g.text);
+      for (const s of sentences) {
+        if (!this.reading) return;
+        await this._speakAndWait(s, g.p);
+      }
+    }
+    if (!this.reading) return;
+    if (this.pageIndex < pages.length - 1) {
+      this.pageIndex++;
+      this._render();
+      this._afterNav();
+      await this._readCurrentPage();
+    } else if (this.chapterIndex < this.chapters.length - 1) {
+      await this.gotoChapter(this.chapterIndex + 1, 0);
+      await this._readCurrentPage();
+    } else {
+      toast(I18N.t('bookFinished'));
+      this.stopReading();
+    }
+  }
+  _speakAndWait(text, paraIndex) {
+    return new Promise(resolve => {
+      this.tts.enqueue(text, {
+        onstart: () => {
+          this.el.content.querySelectorAll('.para-tts').forEach(el => el.classList.remove('para-tts'));
+          const el = this.el.content.querySelector(`.para[data-p="${paraIndex}"]`);
+          if (el) el.classList.add('para-tts');
+          this.bus.emit('tts:state', { reading: true, paraIndex });
+        },
+        onend: resolve,
+      });
+    });
+  }
+
+  /* ---------- UI 事件 ---------- */
+  _bindUI() {
+    this.el.btnPrev.onclick = () => this.prevPage();
+    this.el.btnNext.onclick = () => this.nextPage();
+    this.el.chapPrev.onclick = () => this.prevChapter();
+    this.el.chapNext.onclick = () => this.nextChapter();
+    this.el.toc.onclick = () => this.bus.emit('reader:toc-open');
+    this.el.ttsPlay.onclick = () => { this.reading ? this.stopReading() : this.startReading(); };
+    this.el.ttsStop.onclick = () => this.stopReading();
+    // 全局键盘翻页（输入框/弹窗打开时不劫持按键）
+    window.addEventListener('keydown', e => this._onKey(e));
+
+    // 热区点击翻页
+    $('#hz-left').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.prevPage(); };
+    $('#hz-right').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.nextPage(); };
+
+    // 触摸滑动
+    let tx = 0, ty = 0;
+    $('#page-frame').addEventListener('touchstart', e => {
+      const t = e.touches[0]; tx = t.clientX; ty = t.clientY;
+    }, { passive: true });
+    $('#page-frame').addEventListener('touchend', e => {
+      const t = e.changedTouches[0];
+      const dx = t.clientX - tx, dy = t.clientY - ty;
+      if (Math.abs(dx) > 56 && Math.abs(dx) > Math.abs(dy) * 1.4 && !this._hasSelection()) {
+        dx < 0 ? this.nextPage() : this.prevPage();
+      }
+    }, { passive: true });
+
+    // 划词弹层
+    this.el.content.addEventListener('mouseup', e => this._maybeShowSelection(e));
+    this.el.content.addEventListener('touchend', e => setTimeout(() => this._maybeShowSelection(e), 120), { passive: true });
+    document.addEventListener('mousedown', e => {
+      if (!$('#sel-popup').contains(e.target)) this._hideSelection();
+    });
+
+    window.addEventListener('resize', debounce(() => {
+      if (this.book) this.applySettings(this.settings);
+    }, 280));
+  }
+  _hasSelection() { const s = window.getSelection(); return s && s.toString().trim().length > 0; }
+  _onKey(e) {
+    if (!this.book) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    // 有弹窗打开时不翻页
+    for (const m of document.querySelectorAll('.modal-backdrop')) {
+      if (m.style.display !== 'none') return;
+    }
+    const k = e.key;
+    if (k === 'ArrowRight' || k === 'PageDown' || k === ' ') { e.preventDefault(); this.nextPage(); }
+    else if (k === 'ArrowLeft' || k === 'PageUp') { e.preventDefault(); this.prevPage(); }
+    else if (k === 'Home') { e.preventDefault(); this.gotoChapter(this.chapterIndex, 0); }
+    else if (k === 'End') { e.preventDefault(); this.gotoChapter(this.chapterIndex, 1e9); }
+  }
+  _maybeShowSelection(e) {
+    const sel = window.getSelection();
+    if (!sel) return;
+    const text = sel.toString().trim();
+    const anchor = sel.anchorNode;
+    if (text.length === 0 || text.length > 500) return this._hideSelection();
+    if (anchor && this.el.content.contains(anchor)) {
+      const action = (this.settings && this.settings.selAction) || 'popup';
+      if (action === 'auto') {
+        if (this.onSelectionAction) this.onSelectionAction(text, 'translate', true);
+        return;
+      }
+      const popup = $('#sel-popup');
+      popup.innerHTML = '';
+      const mk = (label, type) => {
+        const b = document.createElement('button');
+        b.className = 'sp-btn'; b.textContent = label;
+        b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); this._hideSelection(); if (this.onSelectionAction) this.onSelectionAction(text, type); };
+        popup.appendChild(b);
+      };
+      mk(I18N.t('selTranslate'), 'translate');
+      mk(I18N.t('selExplain'), 'explain');
+      mk(I18N.t('selSpeak'), 'speak');
+      const sep = document.createElement('span'); sep.className = 'sp-sep'; popup.appendChild(sep);
+      mk(I18N.t('selCopy'), 'copy');
+      const x = e.clientX || (this.el.content.clientWidth / 2), y = e.clientY || 100;
+      popup.style.left = x + 'px';
+      popup.style.top = y + 'px';
+      popup.classList.add('show');
+    } else {
+      this._hideSelection();
+    }
+  }
+  _hideSelection() {
+    $('#sel-popup').classList.remove('show');
+    if (typeof window.getSelection === 'function') {
+      try { /* 保留选区，仅隐藏弹层 */ } catch (e) { /* noop */ }
+    }
+  }
+}
+
+/** 把长文本切分为句子（用于朗读队列） */
+function splitSentences(text) {
+  const out = [];
+  let cur = '';
+  for (const ch of text) {
+    cur += ch;
+    if ('。！？!?；;…\n'.includes(ch) || cur.length >= 60) { out.push(cur); cur = ''; }
+  }
+  if (cur.trim()) out.push(cur);
+  if (!out.length && text) out.push(text);
+  return out;
+}
+
+
+/* ---------- 12. 备份管理 BackupManager（迁移：导出 / 导入） ---------- */
+const APP_VERSION = '1.0.0';
+
+class BackupManager {
+  constructor(data) { this.data = data; }
+
+  /** 导出：打包全部书籍内容 + 进度 + 设置为一个 JSON 文件 */
+  async export() {
+    const prog = progressUI();
+    prog.show(I18N.t('progCollect')); prog.set(0.15); prog.setSub(I18N.t('progReadDb'));
+    const data = await this.data.exportAll();
+    prog.set(0.7); prog.setSub(I18N.t('progPackJson'));
+    const chapters = data.chapters.reduce((n, c) => n + (c.items ? c.items.length : 0), 0);
+    const payload = {
+      app: 'Offline Novel Reader',
+      appVersion: APP_VERSION,
+      schema: 1,
+      exportedAt: nowStamp(),
+      counts: {
+        books: data.books.length,
+        chapters,
+        positions: data.positions.length,
+        settings: data.settings.length,
+        totalChars: data.books.reduce((n, b) => n + (b.totalChars || 0), 0),
+      },
+      data,
+    };
+    await new Promise(r => setTimeout(r, 30)); // 让进度渲染一下
+    prog.set(0.9);
+    const json = JSON.stringify(payload);
+    const blob = new Blob([json], { type: 'application/json' });
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const name = `novel-reader-backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+    downloadBlob(name, blob);
+    prog.done();
+    return { name, counts: payload.counts };
+  }
+
+  /** 解析备份文件 */
+  parse(text) {
+    let payload;
+    try { payload = JSON.parse(text); } catch (e) { throw new Error(I18N.t('errBackupJson')); }
+    if (!payload || payload.schema !== 1 || !payload.data || !Array.isArray(payload.data.books)) {
+      throw new Error(I18N.t('errBackupSchema'));
+    }
+    return payload;
+  }
+
+  /** 导入: mode = 'merge'(合并去重) | 'overwrite'(覆盖) */
+  async import(payload, mode, onTick) {
+    const prog = progressUI();
+    prog.show(mode === 'overwrite' ? I18N.t('progOverwrite') : I18N.t('progMerge'));
+    prog.set(0.1);
+    prog.setSub(I18N.t('progBooks', { n: payload.data.books.length }));
+    const report = await this.data.importAll(payload.data, mode, onTick);
+    prog.set(1); prog.done();
+    return report;
+  }
+
+  static summarize(data) {
+    return {
+      books: (data.books || []).length,
+      chapters: (data.chapters || []).reduce((n, c) => n + (c.items ? c.items.length : 0), 0),
+      positions: (data.positions || []).length,
+    };
+  }
+}
+
+/* ---------- 13. 应用门面 App（Facade：组装各模块 + 绑定 UI） ---------- */
+class App {
+  constructor() {
+    this.bus = new EventBus();
+    this.settings = { ...App.DEFAULT_SETTINGS };
+    this._activeBookId = null;
+    this._searchTerm = '';
+  }
+
+  static get DEFAULT_SETTINGS() {
+    return {
+      lang: '',           // '' = 跟随浏览器语言自动检测
+      theme: 'light',
+      fontSize: 18,
+      lineHeight: 1.9,
+      fontFamily: 'serif',
+      pageWidth: 84,
+      hitZone: true,
+      indent: true,
+      selAction: 'popup',
+      ttsRate: 1,
+      ttsVoice: '',
+    };
+  }
+
+  async init() {
+    // ---- 存储层（IndexedDB 优先，localStorage 降级）----
+    this.adapter = await App._pickAdapter();
+    this.data = new DataManager(this.adapter, this.bus);
+    this.data._worker = TextWorker.create();
+
+    // ---- 设置 ----
+    for (const key of Object.keys(App.DEFAULT_SETTINGS)) {
+      this.settings[key] = await this.data.getSetting(key, App.DEFAULT_SETTINGS[key]);
+    }
+    // ---- 界面语言（设置优先，未设置时跟随浏览器语言）----
+    const detect = () => (navigator.language || navigator.languages?.[0] || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+    I18N.lang = (this.settings.lang === 'zh' || this.settings.lang === 'en') ? this.settings.lang : detect();
+    if (this.settings.lang !== I18N.lang) {
+      this.settings.lang = I18N.lang;
+      this.data.setSetting('lang', I18N.lang).catch(() => {});
+    }
+    I18N.applyStatic();
+    this._applySettings();
+
+    // ---- 词典（离线策略注册表 + 自定义词条）----
+    const custom = await this.data.getSetting('customDict', []);
+    this.dict = new DictionaryService(this.bus);
+    await this.dict.init(custom);
+    this.backup = new BackupManager(this.data);
+
+    // ---- 阅读器 ----
+    this.reader = new Reader(this.bus);
+    this.reader.data = this.data;
+    this.reader.settings = this.settings;
+    this.reader.onSelectionAction = (text, type, auto) => this._handleSelection(text, type, auto);
+    this.reader.applySettings(this.settings);
+
+    // ---- 事件与 UI ----
+    this._wireBus();
+    this._buildDictPanel();
+    this._bindUI();
+    await this.refreshBooks();
+
+    // ---- 状态栏 ----
+    $('#st-db').textContent = this.adapter.mode === 'indexeddb' ? I18N.t('stDbIdb') : I18N.t('stDbLs');
+    $('#st-worker').textContent = I18N.t('stWorker', { m: I18N.t(this.data._worker.available ? 'workerReady' : 'workerMain') });
+    $('#st-book').textContent = I18N.t('noBook');
+    this._fillRateSelect('#tts-rate');
+    this._fillSettingSelects();
+    this._voices = [];
+    this.reader.tts.onVoices(voices => { this._voices = voices; this._fillVoiceSelect(voices); });
+
+    // ---- 恢复上次阅读的书籍 ----
+    const lastId = await this.data.getSetting('lastBookId', null);
+    if (lastId) {
+      const book = await this.data.getBook(lastId);
+      if (book) await this.openBook(book.id);
+    }
+
+    document.body.dataset.ready = '1';
+    console.info(`[NovelReader] v${APP_VERSION} 就绪 · 存储: ${this.adapter.mode}`);
+  }
+
+  static async _pickAdapter() {
+    try {
+      const a = new IndexedDBAdapter();
+      await a.init();
+      return a;
+    } catch (e) {
+      console.warn('IndexedDB 不可用，降级为 localStorage：', e);
+    }
+    try {
+      return new LocalStorageAdapter();
+    } catch (e) {
+      toast(I18N.t('noStorage'), true, 6000);
+      throw e;
+    }
+  }
+
+  /* ---------- 设置 ---------- */
+  async setSetting(key, value) {
+    this.settings[key] = value;
+    await this.data.setSetting(key, value);
+    // 仅影响阅读排版的设置需要重排页面；其余即时生效即可
+    const layoutKeys = new Set(['theme', 'fontSize', 'lineHeight', 'fontFamily', 'pageWidth', 'hitZone', 'indent']);
+    if (layoutKeys.has(key)) {
+      this._applySettings();
+    } else if (key === 'ttsRate') {
+      this.reader.tts.setRate(value);
+      this._syncSettingsDialog();
+    } else if (key === 'ttsVoice') {
+      this.reader.tts.setVoice(value);
+    } else {
+      this._syncSettingsDialog();
+    }
+  }
+  _applySettings() {
+    document.body.dataset.theme = this.settings.theme;
+    if (this.reader) this.reader.applySettings(this.settings);
+    this._syncSettingsDialog();
+  }
+  _syncSettingsDialog() {
+    $('#set-theme').value = this.settings.theme;
+    $('#set-fontsize').value = String(this.settings.fontSize);
+    $('#set-lineheight').value = String(this.settings.lineHeight);
+    $('#set-fontfamily').value = this.settings.fontFamily;
+    $('#set-pagewidth').value = String(this.settings.pageWidth);
+    $('#set-hitzone').checked = !!this.settings.hitZone;
+    $('#set-indent').checked = !!this.settings.indent;
+    $('#set-selaction').value = this.settings.selAction;
+  }
+
+  /* ---------- 书库 ---------- */
+  async refreshBooks() {
+    const books = await this.data.listBooks();
+    this._books = books;
+    this._renderBookList();
+  }
+
+  _renderBookList() {
+    const ul = $('#book-list');
+    const term = this._searchTerm.trim().toLowerCase();
+    ul.innerHTML = '';
+    for (const b of this._books) {
+      if (term && !(b.title || '').toLowerCase().includes(term) && !(b.author || '').toLowerCase().includes(term)) continue;
+      const li = document.createElement('li');
+      li.className = 'book-item' + (b.id === this._activeBookId ? ' active' : '');
+      li.dataset.id = b.id;
+      const pct = Math.round((b.percent || 0) * 100);
+      const first = (b.title || I18N.t('bookCover')).trim().charAt(0) || I18N.t('bookCover');
+      const meta = [
+        b.chapterCount ? I18N.t('metaChap', { n: b.chapterCount }) : '',
+        I18N.t('metaChars', { n: fmtNum(b.totalChars) }),
+        pct > 0 ? I18N.t('metaRead', { p: pct }) : I18N.t('metaUnread'),
+        b.lastReadAt ? App._timeAgo(b.lastReadAt) : '',
+      ].filter(Boolean).join(' · ');
+      li.innerHTML = `
+        <div class="cover">${escapeHtml(first)}</div>
+        <div class="info">
+          <div class="b-title">${escapeHtml(b.title || I18N.t('untitled'))}</div>
+          <div class="b-meta">${escapeHtml(meta)}</div>
+          <div class="b-progress"><i style="width:${Math.min(100, Math.max(0, pct))}%"></i></div>
+        </div>
+        <button class="b-del" title="${I18N.t('delBookTitle')}">✕</button>
+      `;
+      li.onclick = (e) => {
+        if (e.target.closest('.b-del')) return;
+        this.openBook(b.id);
+      };
+      li.querySelector('.b-del').onclick = (e) => {
+        e.stopPropagation();
+        this._deleteBook(b);
+      };
+      ul.appendChild(li);
+    }
+    if (!ul.children.length) {
+      ul.innerHTML = '<li style="padding:18px 12px;color:var(--muted);font-size:12.5px;line-height:1.8">'
+        + (this._searchTerm ? I18N.t('listEmptySearch') : I18N.t('listEmptyHtml'))
+        + '</li>';
+    }
+  }
+  static _timeAgo(ts) {
+    const diff = Date.now() - ts;
+    if (diff < 60000) return I18N.t('timeAgoJust');
+    if (diff < 3600000) return I18N.t('timeAgoMin', { n: Math.floor(diff / 60000) });
+    if (diff < 86400000) return I18N.t('timeAgoHour', { n: Math.floor(diff / 3600000) });
+    return I18N.t('timeAgoDay', { n: Math.floor(diff / 86400000) });
+  }
+
+  async openBook(id) {
+    const book = await this.data.getBook(id);
+    if (!book) { toast(I18N.t('bookMissing'), true); return; }
+    this._activeBookId = id;
+    this.data.setSetting('lastBookId', id).catch(() => {});
+    this._renderBookList();
+    await this.reader.openBook(book);
+    $('#st-book').textContent = book.title;
+    this.bus.emit('app:book-open', book);
+  }
+
+  async _deleteBook(book) {
+    const ok = await confirmDialog({
+      title: I18N.t('deleteTitle'),
+      message: I18N.t('deleteMsgHtml', { title: escapeHtml(book.title) }),
+      okText: I18N.t('deleteOk'), danger: true,
+    });
+    if (!ok) return;
+    await this.data.deleteBook(book.id);
+    if (this._activeBookId === book.id) {
+      this._activeBookId = null;
+      this.reader.closeBook();
+      $('#st-book').textContent = I18N.t('noBook');
+    }
+    await this.refreshBooks();
+    toast(I18N.t('deletedMsg', { title: book.title }));
+  }
+
+  /* ---------- 导入小说 ---------- */
+  async importFiles(files) {
+    let lastBook = null;
+    const list = [...files].filter(f => /\.(txt|md|text)$/i.test(f.name) || f.type.startsWith('text/'));
+    if (!list.length) { toast(I18N.t('noTxtFiles'), true); return; }
+    const prog = progressUI();
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      prog.show(I18N.t('importing', { a: i + 1, b: list.length }));
+      prog.setSub(f.name);
+      prog.set((i) / Math.max(1, list.length));
+      try {
+        const buf = await f.arrayBuffer();
+        const { text, encoding } = decodeTextBytes(buf);
+        const title = f.name.replace(/\.(txt|md|text)$/i, '').trim() || I18N.t('untitled');
+        const book = await this._importText({ title, sourceName: f.name, text, encoding });
+        if (book) lastBook = book;
+      } catch (e) {
+        console.error(e);
+        toast(I18N.t('importFail', { name: f.name, msg: e.message }), true);
+      }
+    }
+    prog.set(1); prog.done();
+    await this.refreshBooks();
+    if (lastBook) await this.openBook(lastBook.id);
+  }
+
+  async _importText({ title, sourceName, text, encoding }) {
+    const { duplicate, book } = await this.data.importText({ title, sourceName, text });
+    if (duplicate) {
+      const ok = await confirmDialog({
+        title: I18N.t('dupTitle'),
+        message: I18N.t('dupMsgHtml', { title: escapeHtml(book.title) }),
+        okText: I18N.t('dupOk'), danger: true,
+      });
+      if (!ok) return null;
+      await this.data.replaceBook({ id: book.id, title, sourceName, text });
+      toast(I18N.t('reimported', { title }));
+      return { id: book.id, title };
+    }
+    toast(I18N.t('imported', { title }));
+    return { id: book.id, title };
+  }
+
+  /* ---------- 划词操作 ---------- */
+  _handleSelection(text, type, auto) {
+    switch (type) {
+      case 'translate':
+        this._openDictPanel(text, 'translate', auto);
+        break;
+      case 'explain':
+        this._openDictPanel(text, 'explain', auto);
+        break;
+      case 'speak':
+        this._speakSelection(text);
+        break;
+      case 'copy':
+        navigator.clipboard && navigator.clipboard.writeText(text)
+          .then(() => toast(I18N.t('copied')))
+          .catch(() => { window.prompt(I18N.t('copyPrompt'), text); });
+        break;
+    }
+  }
+  _speakSelection(text) {
+    if (!this.reader.tts.supported) { toast(I18N.t('noTts'), true); return; }
+    this.reader.stopReading();
+    this.reader.tts.speakOnce(text, this.settings.ttsRate, this.settings.ttsVoice, () => {});
+    toast(I18N.t('speakingSel'));
+  }
+
+  /* ---------- 词典面板 ---------- */
+  _renderDictTabs() {
+    const tabs = $('#dict-tabs');
+    tabs.innerHTML = '';
+    for (const d of DictionaryService.DICTS) {
+      const b = document.createElement('button');
+      b.className = 'tab'; b.dataset.dict = d.id;
+      b.textContent = I18N.t('d_' + d.id);
+      b.title = I18N.t('d_hint_' + d.id);
+      b.onclick = () => { this._dictActive = d.id; this._dictMode = ''; this._renderDict(); };
+      tabs.appendChild(b);
+    }
+    if (!this._dictActive) this._dictActive = 'en2cn';
+    $$('#dict-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.dict === this._dictActive));
+  }
+  _buildDictPanel() {
+    this._dictActive = this._dictActive || 'en2cn';
+    this._dictQuery = '';
+    this._renderDictTabs();
+    $('#dict-close').onclick = () => $('#dict-panel').classList.remove('open');
+    $('#dict-go').onclick = () => this._runDictQuery($('#dict-input').value);
+    $('#dict-input').addEventListener('keydown', e => { if (e.key === 'Enter') this._runDictQuery(e.target.value); });
+  }
+
+  /** 界面语言切换（中 / EN） */
+  async _switchLang() {
+    const next = I18N.lang === 'zh' ? 'en' : 'zh';
+    I18N.lang = next;
+    this.settings.lang = next;
+    try { await this.data.setSetting('lang', next); } catch (e) { /* 设置项保底失败不阻塞切换 */ }
+    I18N.applyStatic();
+    this._renderBookList();            // 书库空状态 / 元信息文案
+    this._renderDictTabs();            // 词典标签
+    this._renderDict();                // 当前查询结果文案
+    this._fillVoiceSelect(this._voices || []); // 默认发音人
+    $('#st-book').textContent = this.reader.book ? this.reader.book.title : I18N.t('noBook');
+    $('#st-tts').textContent = this.reader.reading ? I18N.t('stReading') : '';
+    if ($('#dlg-chapters').style.display !== 'none') this._openToc();
+  }
+
+  _openDictPanel(text, mode, auto) {
+    this._dictMode = mode;
+    this._dictQuery = text;
+    $('#dict-input').value = text;
+    $('#dict-panel').classList.add('open');
+    this._renderDict();
+  }
+
+  _runDictQuery(text) {
+    text = (text || '').trim();
+    if (!text) { toast(I18N.t('dictNeedQuery')); return; }
+    this._dictMode = '';   // 手动查询：回到「查词/翻译」视图
+    this._dictQuery = text;
+    this._renderDict();
+  }
+
+  /** 按当前标签渲染词典结果 */
+  _renderDict() {
+    const q = (this._dictQuery || '').trim();
+    const out = $('#dict-result');
+    if (!q) {
+      out.innerHTML = `<div class="dict-empty">${I18N.t('dictEmptyHtml')}</div>`;
+      return;
+    }
+    $$('#dict-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.dict === this._dictActive));
+    const lang = DictionaryService.detectLang(q);
+    const trans = this.dict.translate(q);
+    const explain = this.dict.explain(q);
+
+    let html = '';
+    // 来源文本
+    html += `<div class="dict-src-text"><q>${escapeHtml(q.length > 120 ? q.slice(0, 120) + '…' : q)}</q></div>`;
+
+    // 翻译模式：按语言方向自动选择词典（中→英 / 英→中）；手动查词按当前标签
+    const dictId = this._dictMode === 'translate' ? (trans.lang === 'cn' ? 'cn2en' : 'en2cn') : this._dictActive;
+    if (this._dictMode === 'explain') {
+      // 解释模式：展示中文解释（成语 / 词语 / 逐字 / 未收录），与「翻译」明确区分
+      if (lang !== 'cn') {
+        html += `<div class="dict-empty">${I18N.t('explainCnOnly')}</div>`;
+      } else {
+        html += `<div class="dict-title">${I18N.t('explainHeader')}</div>`;
+        if (explain && explain.idiom) {
+          html += `<div class="dict-title">${I18N.t('explainIdiom')}</div>`;
+          html += `<div class="dict-entry"><span class="w">${escapeHtml(explain.idiom.word)}</span><span class="d">${escapeHtml(explain.idiom.gloss)}</span><span class="dict-tag">${I18N.t('tagIdiom')}</span></div>`;
+        }
+        if (explain && explain.words.length) {
+          html += `<div class="dict-title">${I18N.t('explainWords')}</div>`;
+          html += explain.words.slice(0, 40).map(w =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(w.word)}</span><span class="d">${escapeHtml(w.gloss)}</span><span class="dict-tag">cn2en</span></div>`).join('');
+        }
+        // 未成词的单字：逐字解释
+        const leftover = [...new Set((explain.chars || []).filter(c => c.trim()))];
+        if (leftover.length) {
+          const withG = leftover.filter(c => this.dict.maps.chars.has(c));
+          const noG = leftover.filter(c => !this.dict.maps.chars.has(c));
+          if (withG.length) {
+            html += `<div class="dict-title">${I18N.t('explainChars')}</div>`;
+            html += withG.slice(0, 30).map(c =>
+              `<div class="dict-entry"><span class="w">${escapeHtml(c)}</span><span class="d">${escapeHtml(this.dict.maps.chars.get(c))}</span><span class="dict-tag">${I18N.t('tagChar')}</span></div>`).join('');
+          }
+          if (noG.length) html += `<div class="dict-title">${I18N.t('explainUnknown')}</div><p class="muted-text">${escapeHtml(noG.slice(0, 30).join(' '))}</p>`;
+        }
+      }
+    } else {
+      // 翻译 / 查词模式：翻译给出整句词义 + 词典对照表；手动查词只给对应标签的词条
+      if (this._dictMode === 'translate') {
+        html += `<div class="dict-title">${I18N.t('dictLineGloss')}</div>`;
+        html += `<div class="dict-translate">${this._renderSegments(trans)}</div>`;
+      }
+      if (dictId === 'en2cn') {
+        if (trans.lang !== 'en') {
+          html += `<div class="dict-empty">${I18N.t('dictEnEmpty')}</div>`;
+        } else {
+          html += `<div class="dict-title">${I18N.t('dictEnTitle', { hit: trans.segments.filter(s => s.gloss).length, total: trans.segments.length })}</div>`;
+          html += trans.segments.filter(s => s.gloss).map(s =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(s.txt)}</span><span class="d">${escapeHtml(s.gloss)}</span><span class="dict-tag">en2cn</span></div>`).join('');
+          if (trans.unknown.length) html += `<div class="dict-title">${I18N.t('dictUnknown')}</div><p class="muted-text">${escapeHtml(trans.unknown.slice(0, 20).join(' / '))}</p>`;
+        }
+      } else if (dictId === 'cn2en') {
+        if (trans.lang !== 'cn') {
+          html += `<div class="dict-empty">${I18N.t('dictCnEmpty')}</div>`;
+        } else {
+          html += `<div class="dict-title">${I18N.t('dictCnTitle', { hit: trans.segments.filter(s => s.gloss).length, total: trans.segments.length })}</div>`;
+          html += trans.segments.filter(s => s.gloss && s.dict === 'cn2en').map(s =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(s.txt)}</span><span class="d">${escapeHtml(s.gloss)}</span><span class="dict-tag">cn2en</span></div>`).join('');
+        }
+      } else if (dictId === 'idioms') {
+        const items = [];
+        if (explain && explain.idiom) items.push(explain.idiom);
+        if (q.length > 0) {
+          // 在全文中扫描所有成语
+          for (let i = 0; i < q.length; i++) {
+            for (let L = 4; L >= 3; L--) {
+              const w = q.slice(i, i + L);
+              if (this.dict.maps.idioms.has(w)) items.push({ word: w, gloss: this.dict.maps.idioms.get(w) });
+              if (items.length > 40) break;
+            }
+          }
+        }
+        // 去重
+        const seen = new Set(); const uniq = items.filter(it => { if (seen.has(it.word)) return false; seen.add(it.word); return true; });
+        if (!uniq.length) html += `<div class="dict-empty">${I18N.t('dictNoIdiom')}</div>`;
+        else {
+          html += `<div class="dict-title">${I18N.t('dictIdiomTitle', { n: uniq.length })}</div>`;
+          html += uniq.map(it =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(it.word)}</span><span class="d">${escapeHtml(it.gloss)}</span><span class="dict-tag">${I18N.t('tagIdiom')}</span></div>`).join('');
+        }
+      } else if (dictId === 'chars') {
+        if (lang !== 'cn') {
+          html += `<div class="dict-empty">${I18N.t('charsCnOnly')}</div>`;
+        } else {
+          const uniq = [...new Set(q.replace(/\s+/g, '').split(''))];
+          const withGloss = uniq.filter(c => this.dict.maps.chars.has(c));
+          const without = uniq.filter(c => !this.dict.maps.chars.has(c));
+          html += `<div class="dict-title">${I18N.t('charsTitle', { hit: withGloss.length, total: uniq.length })}</div>`;
+          html += withGloss.map(c =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(c)}</span><span class="d">${escapeHtml(this.dict.maps.chars.get(c))}</span><span class="dict-tag">${I18N.t('tagChar')}</span></div>`).join('');
+          if (without.length) html += `<div class="dict-title">${I18N.t('charsMissing')}</div><p class="muted-text">${escapeHtml(without.slice(0, 30).join(' '))}</p>`;
+        }
+      }
+    }
+    html += this._renderCustomDict();
+    out.innerHTML = html;
+  }
+
+  _renderSegments(trans) {
+    return trans.segments.map(s => {
+      if (s.gloss) {
+        return `<span class="dict-seg hit" title="${escapeHtml(s.txt + ' → ' + s.gloss)}">${escapeHtml(s.txt)}</span>`;
+      }
+      return `<span class="dict-seg miss">${escapeHtml(s.txt)}</span>`;
+    }).join('');
+  }
+
+  /** 自定义词条（写入 / 删除数据的功能演示） */
+  _renderCustomDict() {
+    const entries = this.dict.custom;
+    let html = `<div class="dict-title">${I18N.t('customTitleHtml')}</div>`;
+    html += `<div class="custom-entry">
+      <input id="cd-word" placeholder="${I18N.t('cdWordPh')}" autocomplete="off">
+      <input id="cd-gloss" placeholder="${I18N.t('cdGlossPh')}" autocomplete="off">
+      <button id="cd-add" class="btn ghost" style="padding:6px 10px">${I18N.t('cdAdd')}</button>
+    </div>`;
+    if (entries.length) {
+      html += entries.slice().reverse().map(e =>
+        `<div class="custom-entry"><span class="w" style="min-width:80px">${escapeHtml(e.word)}</span><span class="d" style="flex:1">${escapeHtml(e.gloss)}</span><button data-del="${escapeHtml(e.word)}" style="color:var(--danger);font-size:13px;padding:4px 8px">${I18N.t('cdDel')}</button></div>`).join('');
+    } else {
+      html += `<p class="muted-text" style="font-size:12px">${I18N.t('cdEmpty')}</p>`;
+    }
+    // 事件在渲染后绑定
+    setTimeout(() => this._bindCustomDictUI(), 0);
+    return html;
+  }
+  _bindCustomDictUI() {
+    const add = $('#cd-add');
+    if (!add) return;
+    add.onclick = async () => {
+      const w = $('#cd-word').value.trim();
+      const g = $('#cd-gloss').value.trim();
+      if (!w || !g) { toast(I18N.t('cdFill')); return; }
+      await this.dict.addCustomEntry(w, g);
+      await this.data.setSetting('customDict', this.dict.custom);
+      $('#cd-word').value = ''; $('#cd-gloss').value = '';
+      this._renderDict();
+      toast(I18N.t('cdAdded'));
+    };
+    $$('[data-del]').forEach(b => {
+      b.onclick = async () => {
+        await this.dict.removeCustomEntry(b.dataset.del);
+        await this.data.setSetting('customDict', this.dict.custom);
+        this._renderDict();
+      };
+    });
+  }
+
+  /* ---------- 备份 ---------- */
+  async exportBackup() {
+    try {
+      const { name, counts } = await this.backup.export();
+      toast(I18N.t('exportedMsg', { name, books: counts.books, chapters: counts.chapters, chars: fmtNum(counts.totalChars) }));
+    } catch (e) {
+      console.error(e);
+      toast(I18N.t('exportFail', { msg: e.message }), true);
+    }
+  }
+
+  async importBackupFile(file) {
+    try {
+      const text = await file.text();
+      const payload = this.backup.parse(text);
+      const sum = BackupManager.summarize(payload.data);
+      const counts = payload.counts;
+
+      const mode = await App._threeWay({
+        title: I18N.t('importTitle'),
+        message:
+          I18N.t('bkFileHtml', { name: escapeHtml(file.name) }) +
+          I18N.t('bkTimeHtml', { t: escapeHtml(payload.exportedAt || '—') }) +
+          I18N.t('bkContainsHtml', { books: sum.books, chapters: sum.chapters, positions: sum.positions }) +
+          (counts ? I18N.t('bkCharsHtml', { chars: fmtNum(counts.totalChars) }) : '') +
+          I18N.t('bkMergeHtml') +
+          I18N.t('bkOverwriteHtml'),
+        okText: I18N.t('mergeOk'),
+        extraText: I18N.t('overwriteExtra'),
+      });
+      if (!mode) return;
+      if (mode === 'extra') {
+        const c = await confirmDialog({
+          title: I18N.t('confirmOverwriteTitle'),
+          message: I18N.t('confirmOverwriteMsgHtml'),
+          okText: I18N.t('confirmOverwriteOk'), danger: true,
+        });
+        if (!c) return;
+      }
+      const report = await this.backup.import(payload, mode === 'extra' ? 'overwrite' : 'merge');
+      // 重新加载
+      this._books = null;
+      this.reader.closeBook();
+      this._activeBookId = null;
+      await this.refreshBooks();
+      const lastId = await this.data.getSetting('lastBookId', null);
+      if (lastId) {
+        const book = await this.data.getBook(lastId);
+        if (book) await this.openBook(book.id);
+      }
+      toast(I18N.t('importDone', { books: report.books, chapters: report.chapters, positions: report.positions, skipped: report.skipped }));
+    } catch (e) {
+      console.error(e);
+      toast(I18N.t('importFail', { msg: e.message }), true);
+    }
+  }
+
+  /** 三按钮选择框：resolve('ok' | 'extra' | false) */
+  static _threeWay({ title, message, okText, extraText }) {
+    return new Promise(resolve => {
+      const dlg = $('#dlg-confirm');
+      $('#cf-title').textContent = title;
+      $('#cf-message').innerHTML = message;
+      $('#cf-ok').textContent = okText;
+      $('#cf-ok').className = 'btn primary';
+      let extraBtn = $('#cf-extra');
+      if (!extraBtn) {
+        extraBtn = document.createElement('button');
+        extraBtn.id = 'cf-extra';
+        $('#cf-cancel').after(extraBtn);
+      }
+      extraBtn.textContent = extraText;
+      extraBtn.className = 'btn danger';
+      extraBtn.style.display = '';
+      const close = v => {
+        dlg.style.display = 'none';
+        $('#cf-ok').onclick = $('#cf-cancel').onclick = extraBtn.onclick = null;
+        resolve(v);
+      };
+      $('#cf-ok').onclick = () => close('ok');
+      $('#cf-cancel').onclick = () => close(false);
+      extraBtn.onclick = () => close('extra');
+      dlg.style.display = 'flex';
+    });
+  }
+
+  /* ---------- 目录 ---------- */
+  _openToc() {
+    if (!this.reader.book) return;
+    const ul = $('#toc-list');
+    ul.innerHTML = '';
+    const titles = this.reader.book.chapterTitles || this.reader.chapters.map(c => c.title);
+    $('#toc-title').textContent = I18N.t('tocTitle') + ' · ' + this.reader.book.title + ' (' + titles.length + ')';
+    titles.forEach((t, i) => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="ci">${i + 1}</span>${escapeHtml(t)}`;
+      if (i === this.reader.chapterIndex) li.classList.add('current');
+      li.onclick = () => {
+        $('#dlg-chapters').style.display = 'none';
+        this.reader.gotoChapter(i, 0);
+      };
+      ul.appendChild(li);
+    });
+    $('#dlg-chapters').style.display = 'flex';
+  }
+
+  /* ---------- 事件总线 ---------- */
+  _wireBus() {
+    this.bus.on('books:changed', () => this.refreshBooks());
+    this.bus.on('reader:page', (info) => {
+      $('#st-chapter').textContent = (info.title || '').slice(0, 30);
+    });
+    this.bus.on('reader:toc-open', () => this._openToc());
+    this.bus.on('tts:state', (s) => {
+      $('#st-tts').textContent = s.reading ? I18N.t('stReading') : '';
+    });
+    this.bus.on('settings:changed', () => { /* 已经即时应用 */ });
+  }
+
+  /* ---------- UI 事件绑定 ---------- */
+  _bindUI() {
+    $('#toggle-sidebar').onclick = () => $('#sidebar').classList.toggle('open');
+    $('#btn-import').onclick = () => $('#file-input').click();
+    $('#btn-paste').onclick = () => $('#dlg-paste').style.display = 'flex';
+    $('#paste-ok').onclick = async () => {
+      const title = $('#paste-title').value.trim();
+      const text = $('#paste-text').value;
+      if (!title) { toast(I18N.t('needTitle')); return; }
+      if (!text.trim()) { toast(I18N.t('needText')); return; }
+      $('#dlg-paste').style.display = 'none';
+      const book = await this._importText({ title, sourceName: I18N.t('pasteSource'), text });
+      $('#paste-title').value = ''; $('#paste-text').value = '';
+      await this.refreshBooks();
+      if (book) await this.openBook(book.id);
+    };
+    $('#btn-export').onclick = () => this.exportBackup();
+    $('#btn-import-backup').onclick = () => $('#backup-input').click();
+    $('#backup-input').onchange = (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) this.importBackupFile(f);
+      e.target.value = '';
+    };
+    $('#file-input').onchange = (e) => {
+      if (e.target.files && e.target.files.length) this.importFiles(e.target.files);
+      e.target.value = '';
+    };
+    $('#book-search').oninput = debounce((e) => {
+      this._searchTerm = e.target.value;
+      this._renderBookList();
+    }, 180);
+
+    // 语言切换
+    $('#btn-lang').onclick = () => this._switchLang();
+
+    // 设置对话框
+    bindModal($('#dlg-settings'), $('#btn-settings'));
+    const bindSelect = (id, key) => {
+      $(id).onchange = (e) => { this.setSetting(key, e.target.value); };
+    };
+    bindSelect('#set-theme', 'theme');
+    bindSelect('#set-fontsize', 'fontSize');
+    bindSelect('#set-lineheight', 'lineHeight');
+    bindSelect('#set-fontfamily', 'fontFamily');
+    bindSelect('#set-pagewidth', 'pageWidth');
+    bindSelect('#set-selaction', 'selAction');
+    $('#set-hitzone').onchange = e => this.setSetting('hitZone', e.target.checked);
+    $('#set-indent').onchange = e => this.setSetting('indent', e.target.checked);
+
+    // 工具栏语速 / 发音人
+    $('#tts-rate').onchange = e => this.setSetting('ttsRate', parseFloat(e.target.value));
+    $('#tts-voice').onchange = e => {
+      this.setSetting('ttsVoice', e.target.value);
+      this.reader.tts.setVoice(e.target.value);
+    };
+
+    // 帮助
+    bindModal($('#dlg-help'), $('#btn-help'));
+    // 目录弹窗
+    $('#dlg-chapters').querySelectorAll('[data-close]').forEach(b => {
+      b.onclick = () => $('#dlg-chapters').style.display = 'none';
+    });
+    $('#dlg-chapters').addEventListener('mousedown', e => {
+      if (e.target === $('#dlg-chapters')) $('#dlg-chapters').style.display = 'none';
+    });
+
+    // 隐藏状态时保存进度（移动端切后台）
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.reader._persistPosition();
+    });
+    window.addEventListener('beforeunload', () => {
+      try { this.reader._persistPosition(); } catch (e) { /* noop */ }
+    });
+  }
+
+  _fillRateSelect(idSel) {
+    const sel = $(idSel);
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (const r of ['0.5', '0.75', '1', '1.25', '1.5', '1.75', '2']) {
+      const o = document.createElement('option');
+      o.value = r; o.textContent = r + 'x';
+      sel.appendChild(o);
+    }
+    sel.value = String(this.settings.ttsRate);
+  }
+  /** 填充设置里的数值型下拉：字号 / 行距 / 页宽 */
+  _fillSettingSelects() {
+    this._fillNumSelect('#set-fontsize', [14, 16, 18, 20, 22, 24, 26, 28, 30], String(this.settings.fontSize));
+    this._fillNumSelect('#set-lineheight', [1.4, 1.6, 1.8, 1.9, 2.0, 2.2, 2.4], String(this.settings.lineHeight));
+    this._fillNumSelect('#set-pagewidth', [60, 70, 80, 84, 90, 100], String(this.settings.pageWidth), '%');
+  }
+  _fillNumSelect(idSel, values, current, suffix = '') {
+    const sel = $(idSel);
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (const v of values) {
+      const o = document.createElement('option');
+      o.value = String(v); o.textContent = String(v) + suffix;
+      sel.appendChild(o);
+    }
+    // 若当前值不在预设内（如从备份迁移而来），补一项避免下拉空白
+    if (!values.map(String).includes(String(current))) {
+      const o = document.createElement('option');
+      o.value = String(current); o.textContent = String(current) + suffix;
+      sel.appendChild(o);
+    }
+    sel.value = String(current);
+  }
+  _fillVoiceSelect(voices) {
+    const sel = $('#tts-voice');
+    sel.innerHTML = '<option value="">' + I18N.t('defaultVoice') + '</option>';
+    const zh = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
+    const rest = voices.filter(v => !(v.lang && v.lang.toLowerCase().startsWith('zh')));
+    const add = v => {
+      const o = document.createElement('option');
+      o.value = v.voiceURI;
+      o.textContent = `${v.name} (${v.lang})`;
+      sel.appendChild(o);
+    };
+    zh.forEach(add); rest.forEach(add);
+    sel.value = this.settings.ttsVoice || '';
+  }
+}
+
+/* ---------- 14. 启动 ---------- */
+(function boot() {
+  window.addEventListener('error', (e) => {
+    console.error('[NovelReader] 全局错误:', e.message, e.filename, e.lineno);
+    const db = $('#st-db');
+    if (db) db.textContent = I18N.t('runtimeError');
+    toast(I18N.t('errToast', { msg: e.message }), true, 4000);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    console.error('[NovelReader] 未处理拒绝:', e.reason);
+  });
+
+  const app = new App();
+  app.init()
+    .then(() => {
+      window.__app = app; // 便于控制台调试
+    })
+    .catch(err => {
+      console.error(err);
+      toast(I18N.t('initFail', { msg: err.message }), true, 8000);
+      document.body.dataset.ready = 'error';
+    });
+})();
+
