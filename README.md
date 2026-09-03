@@ -7,7 +7,7 @@ A fully **offline, single-file HTML** novel reader that runs purely in your brow
 No server, no network, no build step needed to use it — just open the file.
 
 <div align="center">
-   <img src="doc/main-window.png" alt="Fully offline single-file HTML novel reader"/>
+   <img src="doc/window.png" alt="Fully offline single-file HTML novel reader"/>
 </div>
 
 ---
