@@ -70,6 +70,21 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 #topbar{grid-area:topbar; display:flex; align-items:center; gap:8px; padding:0 14px;
   background:var(--bg2); border-bottom:1px solid var(--line); z-index:50;
   box-shadow:0 2px 8px rgba(0,0,0,.06)}
+/* 顶栏品牌图标：∞ 无限符号（无限流）· 霓虹渐变 + 辉光呼吸（未来风） */
+.tb-logo{
+  font-size:26px; line-height:1; font-weight:700; padding-right:2px;
+  font-family:"Segoe UI Symbol","Arial Nova","Arial",sans-serif;
+  background:linear-gradient(135deg,#00e5ff 0%,#7c4dff 55%,#ff4dd2 100%);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  filter:drop-shadow(0 0 5px rgba(0,229,255,.5)) drop-shadow(0 0 12px rgba(124,77,255,.32));
+  user-select:none; -webkit-user-select:none; pointer-events:none;
+  animation:logoGlow 3.4s ease-in-out infinite;
+}
+@keyframes logoGlow{
+  0%,100%{filter:drop-shadow(0 0 4px rgba(0,229,255,.42)) drop-shadow(0 0 10px rgba(124,77,255,.26))}
+  50%{filter:drop-shadow(0 0 9px rgba(0,229,255,.8)) drop-shadow(0 0 18px rgba(124,77,255,.5))}
+}
+@media (prefers-reduced-motion:reduce){.tb-logo{animation:none}}
 #statusbar{grid-area:statusbar; display:flex; align-items:center; gap:16px; padding:0 14px;
   font-size:12px; color:var(--muted); background:var(--bg2); border-top:1px solid var(--line);
   overflow:hidden; white-space:nowrap}
@@ -369,6 +384,7 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 
   <!-- ===== 顶栏 ===== -->
   <header id="topbar">
+    <span class="tb-logo" aria-hidden="true">∞</span>
     <button class="btn ghost icon" id="toggle-sidebar" data-i18n-title="tocTitle">☰</button>
     <div class="tb-spacer"></div>
     <button class="btn primary" id="btn-import" data-i18n-title="impTitle" data-i18n="btnImport">⬆ 导入小说</button>
