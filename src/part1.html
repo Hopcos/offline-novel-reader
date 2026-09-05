@@ -63,8 +63,8 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 /* ---------- 应用布局 ---------- */
 #app{
   display:grid; height:100vh;
-  grid-template-areas:"topbar topbar" "sidebar main" "statusbar statusbar";
-  grid-template-columns:280px 1fr;
+  grid-template-areas:"topbar topbar" "main main" "statusbar statusbar";
+  grid-template-columns:1fr;
   grid-template-rows:52px 1fr 30px;
 }
 #topbar{grid-area:topbar; display:flex; align-items:center; gap:8px; padding:0 14px;
@@ -91,9 +91,15 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 .btn.icon{padding:7px 9px}
 .btn:disabled{opacity:.45; cursor:not-allowed}
 
-/* ---------- 侧栏 书库 ---------- */
-#sidebar{grid-area:sidebar; background:var(--bg2); border-right:1px solid var(--line);
-  display:flex; flex-direction:column; overflow:hidden; z-index:30}
+/* ---------- 侧栏 书库（所有视口统一为抽屉：默认收起，☰ 展开） ---------- */
+#sidebar{
+  position:fixed; left:0; top:52px; bottom:30px; width:min(300px,86vw); z-index:35;
+  background:var(--bg2); border-right:1px solid var(--line);
+  display:flex; flex-direction:column; overflow:hidden;
+  transform:translateX(-105%); transition:transform .22s ease;
+  box-shadow:8px 0 24px rgba(0,0,0,.18);
+}
+#sidebar.open{transform:none}
 .side-search{padding:10px 12px; border-bottom:1px solid var(--line)}
 .side-search input{
   width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--line);
@@ -212,10 +218,8 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 .more-row{display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--muted)}
 .more-row select{flex:1; min-width:0}
 
-/* 底部/右侧点击翻页热区 */
-.hot-zone{position:absolute; top:0; bottom:0; width:26%; z-index:5; cursor:pointer}
-#hz-left{left:0}
-#hz-right{right:0}
+/* 阅读区点击翻页：不再用覆盖热区（覆盖层会挡住文本选取、显示手掌光标），
+   由正文的 click 处理器按横坐标判定左右（见 Reader._bindUI） */
 
 /* ---------- 词典面板 ---------- */
 #dict-panel{
@@ -320,12 +324,6 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 
 /* ---------- 响应式 ---------- */
 @media (max-width:960px){
-  #app{grid-template-columns:1fr}
-  #sidebar{
-    position:fixed; left:0; top:52px; bottom:30px; width:min(300px,86vw);
-    transform:translateX(-105%); transition:transform .22s ease; box-shadow:8px 0 24px rgba(0,0,0,.18);
-  }
-  #sidebar.open{transform:none}
   #dict-panel{
     top:auto; bottom:30px; height:58vh; width:100%; border-top:1px solid var(--line); border-left:none;
     transform:translateY(103%);

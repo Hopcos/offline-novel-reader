@@ -55,8 +55,6 @@
       </div>
       <div id="page-frame">
         <div id="page-content" tabindex="0"></div>
-        <div class="hot-zone" id="hz-left" data-i18n-title="hzPageTitle"></div>
-        <div class="hot-zone" id="hz-right" data-i18n-title="hzPageTitle"></div>
       </div>
     </div>
   </main>
@@ -242,13 +240,15 @@ function downloadBlob(filename, blob) {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
 }
 
-/* ---------- Toast 通知 ---------- */
+/* ---------- Toast 通知（同一时间只保留一条，固定居中位置，避免多次叠加错位） ---------- */
 function toast(msg, isErr = false, ms = 2600) {
+  const host = $('#toasts');
+  host.textContent = '';
   const box = document.createElement('div');
   box.className = 'toast' + (isErr ? ' err' : '');
   box.textContent = msg;
-  $('#toasts').appendChild(box);
-  setTimeout(() => box.remove(), ms);
+  host.appendChild(box);
+  box._timer = setTimeout(() => box.remove(), ms);
 }
 
 /** 通用确认框 → Promise<boolean> */
@@ -350,7 +350,6 @@ const I18N_LANGS = {
     pagePrevTitle: '上一页 (←)',
     pageNextTitle: '下一页 (→)',
     percentTitle: '全书进度',
-    hzPageTitle: '翻页（点击）',
     noBook: '未打开书籍',
     stHint: '划选正文 → 翻译 / 朗读 · 键盘 ← → 翻页',
     stReading: '🔊 朗读中…',
@@ -547,7 +546,6 @@ const I18N_LANGS = {
     pagePrevTitle: 'Previous page (←)',
     pageNextTitle: 'Next page (→)',
     percentTitle: 'Whole-book progress',
-    hzPageTitle: 'Turn page (tap)',
     noBook: 'No book open',
     stHint: 'Select text → translate / speak · ← → keys turn pages',
     stReading: '🔊 Reading…',

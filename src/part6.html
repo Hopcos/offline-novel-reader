@@ -591,9 +591,15 @@ class Reader {
     // 全局键盘翻页（输入框/弹窗打开时不劫持按键）
     window.addEventListener('keydown', e => this._onKey(e));
 
-    // 热区点击翻页
-    $('#hz-left').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.prevPage(); };
-    $('#hz-right').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.nextPage(); };
+    // 点击翻页热区：不用覆盖层（会挡住文本选取、显示手掌光标），
+    // 改为正文上的 click 按横坐标判定（左 26% 上页 / 右 26% 下页）
+    this.el.content.addEventListener('click', e => {
+      if (!this.hotZonesOn || this._hasSelection()) return;
+      const r = this.el.content.getBoundingClientRect();
+      const rel = (e.clientX - r.left) / Math.max(1, r.width);
+      if (rel < 0.26) this.prevPage();
+      else if (rel > 0.74) this.nextPage();
+    });
 
     // 触摸滑动
     let tx = 0, ty = 0;

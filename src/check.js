@@ -51,13 +51,15 @@ function downloadBlob(filename, blob) {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
 }
 
-/* ---------- Toast 通知 ---------- */
+/* ---------- Toast 通知（同一时间只保留一条，固定居中位置，避免多次叠加错位） ---------- */
 function toast(msg, isErr = false, ms = 2600) {
+  const host = $('#toasts');
+  host.textContent = '';
   const box = document.createElement('div');
   box.className = 'toast' + (isErr ? ' err' : '');
   box.textContent = msg;
-  $('#toasts').appendChild(box);
-  setTimeout(() => box.remove(), ms);
+  host.appendChild(box);
+  box._timer = setTimeout(() => box.remove(), ms);
 }
 
 /** 通用确认框 → Promise<boolean> */
@@ -159,7 +161,6 @@ const I18N_LANGS = {
     pagePrevTitle: '上一页 (←)',
     pageNextTitle: '下一页 (→)',
     percentTitle: '全书进度',
-    hzPageTitle: '翻页（点击）',
     noBook: '未打开书籍',
     stHint: '划选正文 → 翻译 / 朗读 · 键盘 ← → 翻页',
     stReading: '🔊 朗读中…',
@@ -356,7 +357,6 @@ const I18N_LANGS = {
     pagePrevTitle: 'Previous page (←)',
     pageNextTitle: 'Next page (→)',
     percentTitle: 'Whole-book progress',
-    hzPageTitle: 'Turn page (tap)',
     noBook: 'No book open',
     stHint: 'Select text → translate / speak · ← → keys turn pages',
     stReading: '🔊 Reading…',
@@ -15730,9 +15730,15 @@ class Reader {
     // 全局键盘翻页（输入框/弹窗打开时不劫持按键）
     window.addEventListener('keydown', e => this._onKey(e));
 
-    // 热区点击翻页
-    $('#hz-left').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.prevPage(); };
-    $('#hz-right').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.nextPage(); };
+    // 点击翻页热区：不用覆盖层（会挡住文本选取、显示手掌光标），
+    // 改为正文上的 click 按横坐标判定（左 26% 上页 / 右 26% 下页）
+    this.el.content.addEventListener('click', e => {
+      if (!this.hotZonesOn || this._hasSelection()) return;
+      const r = this.el.content.getBoundingClientRect();
+      const rel = (e.clientX - r.left) / Math.max(1, r.width);
+      if (rel < 0.26) this.prevPage();
+      else if (rel > 0.74) this.nextPage();
+    });
 
     // 触摸滑动
     let tx = 0, ty = 0;

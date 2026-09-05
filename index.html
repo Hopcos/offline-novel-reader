@@ -63,8 +63,8 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 /* ---------- 应用布局 ---------- */
 #app{
   display:grid; height:100vh;
-  grid-template-areas:"topbar topbar" "sidebar main" "statusbar statusbar";
-  grid-template-columns:280px 1fr;
+  grid-template-areas:"topbar topbar" "main main" "statusbar statusbar";
+  grid-template-columns:1fr;
   grid-template-rows:52px 1fr 30px;
 }
 #topbar{grid-area:topbar; display:flex; align-items:center; gap:8px; padding:0 14px;
@@ -91,9 +91,15 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 .btn.icon{padding:7px 9px}
 .btn:disabled{opacity:.45; cursor:not-allowed}
 
-/* ---------- 侧栏 书库 ---------- */
-#sidebar{grid-area:sidebar; background:var(--bg2); border-right:1px solid var(--line);
-  display:flex; flex-direction:column; overflow:hidden; z-index:30}
+/* ---------- 侧栏 书库（所有视口统一为抽屉：默认收起，☰ 展开） ---------- */
+#sidebar{
+  position:fixed; left:0; top:52px; bottom:30px; width:min(300px,86vw); z-index:35;
+  background:var(--bg2); border-right:1px solid var(--line);
+  display:flex; flex-direction:column; overflow:hidden;
+  transform:translateX(-105%); transition:transform .22s ease;
+  box-shadow:8px 0 24px rgba(0,0,0,.18);
+}
+#sidebar.open{transform:none}
 .side-search{padding:10px 12px; border-bottom:1px solid var(--line)}
 .side-search input{
   width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--line);
@@ -212,10 +218,8 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 .more-row{display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--muted)}
 .more-row select{flex:1; min-width:0}
 
-/* 底部/右侧点击翻页热区 */
-.hot-zone{position:absolute; top:0; bottom:0; width:26%; z-index:5; cursor:pointer}
-#hz-left{left:0}
-#hz-right{right:0}
+/* 阅读区点击翻页：不再用覆盖热区（覆盖层会挡住文本选取、显示手掌光标），
+   由正文的 click 处理器按横坐标判定左右（见 Reader._bindUI） */
 
 /* ---------- 词典面板 ---------- */
 #dict-panel{
@@ -320,12 +324,6 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 
 /* ---------- 响应式 ---------- */
 @media (max-width:960px){
-  #app{grid-template-columns:1fr}
-  #sidebar{
-    position:fixed; left:0; top:52px; bottom:30px; width:min(300px,86vw);
-    transform:translateX(-105%); transition:transform .22s ease; box-shadow:8px 0 24px rgba(0,0,0,.18);
-  }
-  #sidebar.open{transform:none}
   #dict-panel{
     top:auto; bottom:30px; height:58vh; width:100%; border-top:1px solid var(--line); border-left:none;
     transform:translateY(103%);
@@ -423,8 +421,6 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
       </div>
       <div id="page-frame">
         <div id="page-content" tabindex="0"></div>
-        <div class="hot-zone" id="hz-left" data-i18n-title="hzPageTitle"></div>
-        <div class="hot-zone" id="hz-right" data-i18n-title="hzPageTitle"></div>
       </div>
     </div>
   </main>
@@ -610,13 +606,15 @@ function downloadBlob(filename, blob) {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
 }
 
-/* ---------- Toast 通知 ---------- */
+/* ---------- Toast 通知（同一时间只保留一条，固定居中位置，避免多次叠加错位） ---------- */
 function toast(msg, isErr = false, ms = 2600) {
+  const host = $('#toasts');
+  host.textContent = '';
   const box = document.createElement('div');
   box.className = 'toast' + (isErr ? ' err' : '');
   box.textContent = msg;
-  $('#toasts').appendChild(box);
-  setTimeout(() => box.remove(), ms);
+  host.appendChild(box);
+  box._timer = setTimeout(() => box.remove(), ms);
 }
 
 /** 通用确认框 → Promise<boolean> */
@@ -718,7 +716,6 @@ const I18N_LANGS = {
     pagePrevTitle: '上一页 (←)',
     pageNextTitle: '下一页 (→)',
     percentTitle: '全书进度',
-    hzPageTitle: '翻页（点击）',
     noBook: '未打开书籍',
     stHint: '划选正文 → 翻译 / 朗读 · 键盘 ← → 翻页',
     stReading: '🔊 朗读中…',
@@ -915,7 +912,6 @@ const I18N_LANGS = {
     pagePrevTitle: 'Previous page (←)',
     pageNextTitle: 'Next page (→)',
     percentTitle: 'Whole-book progress',
-    hzPageTitle: 'Turn page (tap)',
     noBook: 'No book open',
     stHint: 'Select text → translate / speak · ← → keys turn pages',
     stReading: '🔊 Reading…',
@@ -16289,9 +16285,15 @@ class Reader {
     // 全局键盘翻页（输入框/弹窗打开时不劫持按键）
     window.addEventListener('keydown', e => this._onKey(e));
 
-    // 热区点击翻页
-    $('#hz-left').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.prevPage(); };
-    $('#hz-right').onclick = () => { if (this.hotZonesOn && !this._hasSelection()) this.nextPage(); };
+    // 点击翻页热区：不用覆盖层（会挡住文本选取、显示手掌光标），
+    // 改为正文上的 click 按横坐标判定（左 26% 上页 / 右 26% 下页）
+    this.el.content.addEventListener('click', e => {
+      if (!this.hotZonesOn || this._hasSelection()) return;
+      const r = this.el.content.getBoundingClientRect();
+      const rel = (e.clientX - r.left) / Math.max(1, r.width);
+      if (rel < 0.26) this.prevPage();
+      else if (rel > 0.74) this.nextPage();
+    });
 
     // 触摸滑动
     let tx = 0, ty = 0;
