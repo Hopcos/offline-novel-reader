@@ -76,8 +76,6 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 #main{grid-area:main; position:relative; overflow:hidden; display:flex; flex-direction:column}
 
 /* ---------- 顶栏 ---------- */
-.brand{display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px; margin-right:6px; white-space:nowrap}
-.brand .logo{font-size:20px}
 .tb-spacer{flex:1}
 .btn{
   display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:8px;
@@ -168,6 +166,8 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   color:var(--reader-fg);
   word-break:break-word;
   user-select:text;
+  -webkit-user-select:text;
+  -webkit-touch-callout:none; /* 移动端不弹系统选中菜单，改用自绘划词工具栏 */
 }
 #page-content .para{margin:0 0 .35em; text-indent:2em}
 #page-content.no-indent .para{text-indent:0}
@@ -187,6 +187,30 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 }
 #sel-popup .sp-btn:hover{background:rgba(255,255,255,.15)}
 #sel-popup .sp-sep{width:1px; height:14px; background:rgba(255,255,255,.25)}
+
+/* 移动端「更多」浮层 */
+#btn-more{display:none}
+#more-overlay{
+  position:fixed; inset:0; background:var(--overlay); z-index:88;
+  display:none; align-items:flex-end; justify-content:center;
+}
+#more-overlay.show{display:flex}
+.more-sheet{
+  width:min(480px,100%); max-height:78vh; overflow-y:auto;
+  background:var(--bg2); color:var(--fg); border-radius:16px 16px 0 0;
+  padding:12px 14px calc(18px + env(safe-area-inset-bottom));
+  box-shadow:var(--shadow); animation:toastIn .2s ease;
+}
+.more-head{display:flex; align-items:center; padding:4px 2px 10px; font-weight:700; font-size:14px}
+.more-head span{flex:1}
+.more-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px}
+.more-grid button{
+  padding:12px 4px; border-radius:10px; background:var(--btn-bg); color:var(--btn-fg);
+  font-size:13px; border:1px solid transparent; white-space:nowrap;
+}
+.more-grid button:active{transform:scale(.96)}
+.more-row{display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--muted)}
+.more-row select{flex:1; min-width:0}
 
 /* 底部/右侧点击翻页热区 */
 .hot-zone{position:absolute; top:0; bottom:0; width:26%; z-index:5; cursor:pointer}
@@ -241,7 +265,8 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   width:min(540px,100%); max-height:88vh; display:flex; flex-direction:column;
   animation:popIn .18s ease;
 }
-.modal-head{display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--line)}
+.modal-head{display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--line);
+  cursor:move; touch-action:none; user-select:none; -webkit-user-select:none}
 .modal-head h3{font-size:16px; flex:1}
 .modal-body{padding:16px 18px; overflow-y:auto}
 .modal-foot{display:flex; justify-content:flex-end; gap:10px; padding:12px 18px; border-top:1px solid var(--line)}
@@ -313,9 +338,31 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   #page-content{padding-top:20px; padding-bottom:24px}
   .bt-hide-sm{display:none}
 }
-@media (max-width:560px){
-  .brand .brand-sub{display:none}
-  .rt-toc, .rt-chapnav{display:none}
+/* ---------- 手机端 ---------- */
+@media (max-width:620px){
+  /* 阅读工具栏：核心图标常显（目录 / 上一章 / 下一章 / 播放），次要项收纳进「⋯」浮层 */
+  #btn-more{display:inline-flex}
+  .rtoolbar{gap:4px; padding:6px 8px}
+  .rt-title{min-width:56px; font-size:13px}
+  .rt-gap, #tts-rate, #tts-voice,
+  .rt-page-label, #btn-page-prev, #btn-page-next, .rt-percent{display:none}
+  /* 顶栏：导入按钮压缩为图标，隐藏文字按钮 */
+  #topbar{gap:4px; padding:0 8px}
+  #btn-import, #btn-export, #btn-import-backup{font-size:0}
+  #btn-import::before, #btn-export::before, #btn-import-backup::before{font-size:15px}
+  #btn-import::before{content:'⬆'} #btn-export::before{content:'⇩'} #btn-import-backup::before{content:'⇧'}
+  /* 设置表单单列 */
+  .form-grid{grid-template-columns:1fr}
+  /* 状态栏收窄 */
+  #statusbar{gap:8px; padding:0 10px}
+  #statusbar #st-chapter, #statusbar #st-tts{display:none}
+  #statusbar #st-hint{max-width:38vw; overflow:hidden; text-overflow:ellipsis}
+  /* 弹窗贴边 */
+  .modal-backdrop{padding:10px; align-items:flex-end}
+  .modal{width:100%; max-height:90vh; border-radius:14px 14px 0 0; animation:toastIn .2s ease}
+  /* 划词弹层更紧凑 */
+  #sel-popup{transform:translate(-50%,-140%); padding:4px 5px;}
+  #page-content{padding-top:16px; padding-bottom:20px}
 }
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important; animation:none!important}
@@ -329,7 +376,6 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   <!-- ===== 顶栏 ===== -->
   <header id="topbar">
     <button class="btn ghost icon" id="toggle-sidebar" data-i18n-title="tocTitle">☰</button>
-    <div class="brand"><span class="logo">📖</span><span data-i18n="appName">离线小说阅读器</span></div>
     <div class="tb-spacer"></div>
     <button class="btn primary" id="btn-import" data-i18n-title="impTitle" data-i18n="btnImport">⬆ 导入小说</button>
     <button class="btn ghost icon" id="btn-paste" data-i18n-title="pasteTitle">📋</button>
@@ -378,6 +424,7 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
         <span class="rt-page-label" id="rt-page">1 / 1</span>
         <button class="btn icon" id="btn-page-next" data-i18n-title="pageNextTitle">›</button>
         <span class="rt-percent" id="rt-percent" data-i18n-title="percentTitle">0%</span>
+        <button class="btn ghost icon" id="btn-more" data-i18n-title="moreTitle">⋯</button>
       </div>
       <div id="page-frame">
         <div id="page-content" tabindex="0"></div>
@@ -413,6 +460,31 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 
 <!-- ===== 划词弹出工具栏 ===== -->
 <div id="sel-popup"></div>
+
+<!-- ===== 移动端「更多」浮层 ===== -->
+<div id="more-overlay">
+  <div class="more-sheet">
+    <div class="more-head"><span data-i18n="moreTitle">更多功能</span><button class="btn ghost icon" id="more-close">✕</button></div>
+    <div class="more-grid">
+      <button data-for="#btn-toc" data-i18n="tocTitle">目录</button>
+      <button data-for="#btn-chap-prev" data-i18n="chapPrevTitle">上一章</button>
+      <button data-for="#btn-chap-next" data-i18n="chapNextTitle">下一章</button>
+      <button data-for="#tts-play" data-i18n="ttsPlayTitle">朗读</button>
+      <button data-for="#tts-stop" data-i18n="ttsStopTitle">停止</button>
+      <button data-for="#btn-page-prev" data-i18n="pagePrevTitle">上一页</button>
+      <button data-for="#btn-page-next" data-i18n="pageNextTitle">下一页</button>
+      <button data-for="#btn-settings" data-i18n="settingsTitle">设置</button>
+      <button data-for="#btn-help" data-i18n="helpTitle">帮助</button>
+      <button data-for="#btn-export" data-i18n="btnExport">导出备份</button>
+      <button data-for="#btn-import-backup" data-i18n="btnImpBack">导入备份</button>
+      <button data-for="#btn-paste" data-i18n="pasteTitle">粘贴导入</button>
+      <button data-for="#btn-import" data-i18n="btnImport">导入小说</button>
+      <button data-for="#btn-lang" data-i18n="langSwitch">语言</button>
+    </div>
+    <div class="more-row"><label data-i18n="ttsRateTitle">朗读语速</label><select id="more-rate" class="mini"></select></div>
+    <div class="more-row"><label data-i18n="ttsVoiceTitle">发音人</label><select id="more-voice" class="mini"></select></div>
+  </div>
+</div>
 
 <!-- ===== 目录 ===== -->
 <div class="modal-backdrop" id="dlg-chapters" style="display:none">
@@ -627,6 +699,7 @@ const I18N_LANGS = {
     settingsTitle: '阅读设置',
     helpTitle: '帮助',
     langSwitch: '切换界面语言（中 / EN）',
+    moreTitle: '更多功能',
     // 侧栏
     searchPh: '搜索书名 / 作者…',
     dbInit: '数据库…',
@@ -830,6 +903,7 @@ const I18N_LANGS = {
     settingsTitle: 'Reader settings',
     helpTitle: 'Help',
     langSwitch: 'Switch UI language (English / 中文)',
+    moreTitle: 'More',
     searchPh: 'Search title / author…',
     dbInit: 'Database…',
     workerInit: 'Thread:—',
@@ -4854,6 +4928,10 @@ class ChapterPager {
     this.font = breaker.fontString(fontSize, fontFamily);
     this.lineH = Math.round(fontSize * lineHeight);
     this.availH = Math.max(60, pageH - vPad * 2);
+    // 段落底部间距（与 CSS .para margin-bottom:.35em 一致），分页时计入避免最后一行被裁切
+    this.paraGap = Math.round(fontSize * 0.35);
+    // 底部再保留一行留白：杜绝分数行高 / 舍入误差导致的最后 1~2 行被 overflow:hidden 吞掉
+    this.budgetH = Math.max(40, this.availH - this.lineH);
     this.maxLines = Math.max(1, Math.floor(this.availH / this.lineH));
   }
 
@@ -4862,6 +4940,7 @@ class ChapterPager {
     let group = [];          // 正在填充的页
     let groupStartChar = 0;
     let groupChars = 0;
+    let used = 0;            // 当前页已占用的垂直高度(px)
     let charTotal = 0;       // 已排入行的章节字符数（供 percent 用）
     const flush = () => {
       if (!group.length) return;
@@ -4872,6 +4951,7 @@ class ChapterPager {
       });
       group = [];
       groupChars = 0;
+      used = 0;
     };
     let lineCount = 0;
     const maxW = Math.max(80, this.pageW); // pageW 已扣除内边距
@@ -4879,7 +4959,6 @@ class ChapterPager {
     for (let p = 0; p < paras.length; p++) {
       const text = paras[p];
       if (!text) continue;
-      if (group.length === 0) groupStartChar = charTotal;
       let paraLines = [];
       try {
         paraLines = await this.breaker.breakLines(text, maxW, this.font, this.fontSize);
@@ -4888,9 +4967,15 @@ class ChapterPager {
         paraLines = [[0, text.length]];
       }
       for (const [s, e] of paraLines) {
-        if (group.length >= this.maxLines) flush();
-        if (group.length === 0) groupStartChar = charTotal;
+        // 新段落首行额外计入段落间距（跨页段落由 .para.tight 去间距，只会更宽松）
+        const gap = (group.length > 0 && s === 0) ? this.paraGap : 0;
+        const need = this.lineH + gap;
+        if (group.length > 0 && used + need > this.budgetH) {
+          flush();
+          groupStartChar = charTotal;
+        }
         group.push({ p, s, e });
+        used += need;
         groupChars += e - s;
         charTotal += e - s;
         lineCount++;
@@ -5231,6 +5316,7 @@ class Reader {
   }
 
   async _readCurrentPage() {
+    if (!this.book || !this.chapters) { toast(I18N.t('noBook')); return this.stopReading(); }
     const chapter = this.chapters[this.chapterIndex];
     const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
     const page = pages[this.pageIndex];
@@ -5308,10 +5394,20 @@ class Reader {
       }
     }, { passive: true });
 
-    // 划词弹层
+    // 划词弹层（移动端：抑制系统菜单，自绘 翻译 / 解释 / 朗读 / 复制 工具栏）
+    this._popupAt = 0;
     this.el.content.addEventListener('mouseup', e => this._maybeShowSelection(e));
     this.el.content.addEventListener('touchend', e => setTimeout(() => this._maybeShowSelection(e), 120), { passive: true });
+    // Android 长按会触发 contextmenu：有选区时拦截，改弹自绘工具栏
+    this.el.content.addEventListener('contextmenu', e => {
+      if (this._hasSelection()) {
+        e.preventDefault();
+        this._maybeShowSelection({ clientX: e.clientX, clientY: e.clientY });
+      }
+    });
     document.addEventListener('mousedown', e => {
+      // 触摸结束后的“合成 mousedown”会晚于自绘工具栏弹出，忽略该窗口期内的收起
+      if (Date.now() - this._popupAt < 450) return;
       if (!$('#sel-popup').contains(e.target)) this._hideSelection();
     });
 
@@ -5363,6 +5459,7 @@ class Reader {
       popup.style.left = x + 'px';
       popup.style.top = y + 'px';
       popup.classList.add('show');
+      this._popupAt = Date.now();
     } else {
       this._hideSelection();
     }
@@ -5655,6 +5752,8 @@ class App {
     this.data.setSetting('lastBookId', id).catch(() => {});
     this._renderBookList();
     await this.reader.openBook(book);
+    // 打开书籍后收起书库面板（移动端抽屉）
+    $('#sidebar').classList.remove('open');
     $('#st-book').textContent = book.title;
     this.bus.emit('app:book-open', book);
   }
@@ -5791,6 +5890,9 @@ class App {
     this._dictQuery = text;
     $('#dict-input').value = text;
     $('#dict-panel').classList.add('open');
+    const mo = $('#more-overlay'); if (mo) mo.classList.remove('show');
+    // 清掉正文残留选区，避免随后触摸再次弹出划词工具栏
+    try { const s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) { /* noop */ }
     this._renderDict();
   }
 
@@ -6154,18 +6256,92 @@ class App {
     window.addEventListener('beforeunload', () => {
       try { this.reader._persistPosition(); } catch (e) { /* noop */ }
     });
+
+    // ---------- 移动端「更多」浮层 ----------
+    $('#btn-more').onclick = (e) => { e.stopPropagation(); $('#more-overlay').classList.add('show'); };
+    $('#more-close').onclick = () => $('#more-overlay').classList.remove('show');
+    $('#more-overlay').querySelectorAll('[data-for]').forEach(b => {
+      b.onclick = (ev) => {
+        ev.stopPropagation();
+        $('#more-overlay').classList.remove('show');
+        const t = document.querySelector(b.dataset.for);
+        if (t && typeof t.click === 'function') t.click();
+      };
+    });
+    $('#more-rate').onchange = e => {
+      this.setSetting('ttsRate', parseFloat(e.target.value));
+      const t = $('#tts-rate'); if (t) t.value = e.target.value;
+    };
+    $('#more-voice').onchange = e => {
+      this.setSetting('ttsVoice', e.target.value);
+      this.reader.tts.setVoice(e.target.value);
+      const t = $('#tts-voice'); if (t) t.value = e.target.value;
+    };
+
+    // ---------- 点击面板以外任意位置自动关闭（侧栏 / 词典面板 / 更多浮层） ----------
+    document.addEventListener('pointerdown', e => {
+      const sb = $('#sidebar');
+      if (sb.classList.contains('open') && !sb.contains(e.target) && e.target.id !== 'toggle-sidebar') {
+        sb.classList.remove('open');
+      }
+      const dp = $('#dict-panel');
+      if (dp.classList.contains('open') && !dp.contains(e.target) && !$('#sel-popup').contains(e.target)) {
+        dp.classList.remove('open');
+      }
+      const mo = $('#more-overlay');
+      if (mo.classList.contains('show') && !mo.contains(e.target)) mo.classList.remove('show');
+    }, { passive: true });
+
+    // ---------- 设置等弹窗可拖动（拖标题栏） ----------
+    for (const m of document.querySelectorAll('.modal-backdrop > .modal')) this._makeDraggable(m);
+  }
+
+  /** 让弹窗可拖动：按住标题栏拖动 */
+  _makeDraggable(modal) {
+    const head = modal.querySelector('.modal-head');
+    if (!head) return;
+    let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    head.addEventListener('pointerdown', e => {
+      if (e.button !== undefined && e.button !== 0) return;
+      dragging = true;
+      const r = modal.getBoundingClientRect();
+      modal.style.position = 'fixed';
+      modal.style.margin = '0';
+      modal.style.left = r.left + 'px';
+      modal.style.top = r.top + 'px';
+      ox = r.left; oy = r.top; sx = e.clientX; sy = e.clientY;
+      if (head.setPointerCapture) { try { head.setPointerCapture(e.pointerId); } catch (err) { /* noop */ } }
+      try { e.preventDefault(); } catch (err) { /* noop */ }
+    });
+    head.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const w = modal.offsetWidth, h = modal.offsetHeight;
+      const x = clampNum(ox + (e.clientX - sx), 12 - w + 96, Math.max(12, window.innerWidth - 12));
+      const y = clampNum(oy + (e.clientY - sy), 8, Math.max(8, window.innerHeight - 56));
+      modal.style.left = x + 'px';
+      modal.style.top = y + 'px';
+    });
+    const stopDrag = () => {
+      dragging = false;
+      if (head.releasePointerCapture) { try { head.releasePointerCapture(head.pointerId); } catch (err) { /* noop */ } }
+    };
+    head.addEventListener('pointerup', stopDrag);
+    head.addEventListener('pointercancel', stopDrag);
   }
 
   _fillRateSelect(idSel) {
-    const sel = $(idSel);
-    if (!sel) return;
-    sel.innerHTML = '';
-    for (const r of ['0.5', '0.75', '1', '1.25', '1.5', '1.75', '2']) {
-      const o = document.createElement('option');
-      o.value = r; o.textContent = r + 'x';
-      sel.appendChild(o);
+    // 桌面工具栏 + 移动端「更多」浮层里的语速下拉同源填充
+    for (const id of [idSel, '#more-rate']) {
+      const sel = $(id);
+      if (!sel) continue;
+      sel.innerHTML = '';
+      for (const r of ['0.5', '0.75', '1', '1.25', '1.5', '1.75', '2']) {
+        const o = document.createElement('option');
+        o.value = r; o.textContent = r + 'x';
+        sel.appendChild(o);
+      }
+      sel.value = String(this.settings.ttsRate);
     }
-    sel.value = String(this.settings.ttsRate);
   }
   /** 填充设置里的数值型下拉：字号 / 行距 / 页宽 */
   _fillSettingSelects() {
@@ -6191,18 +6367,23 @@ class App {
     sel.value = String(current);
   }
   _fillVoiceSelect(voices) {
-    const sel = $('#tts-voice');
-    sel.innerHTML = '<option value="">' + I18N.t('defaultVoice') + '</option>';
-    const zh = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
-    const rest = voices.filter(v => !(v.lang && v.lang.toLowerCase().startsWith('zh')));
-    const add = v => {
-      const o = document.createElement('option');
-      o.value = v.voiceURI;
-      o.textContent = `${v.name} (${v.lang})`;
-      sel.appendChild(o);
+    // 桌面工具栏 + 移动端「更多」浮层里的发音人下拉同源填充
+    const render = (sel) => {
+      sel.innerHTML = '<option value="">' + I18N.t('defaultVoice') + '</option>';
+      const zh = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
+      const rest = voices.filter(v => !(v.lang && v.lang.toLowerCase().startsWith('zh')));
+      const add = (sel, v) => {
+        const o = document.createElement('option');
+        o.value = v.voiceURI;
+        o.textContent = `${v.name} (${v.lang})`;
+        sel.appendChild(o);
+      };
+      zh.forEach(v => add(sel, v)); rest.forEach(v => add(sel, v));
+      sel.value = this.settings.ttsVoice || '';
     };
-    zh.forEach(add); rest.forEach(add);
-    sel.value = this.settings.ttsVoice || '';
+    const a = $('#tts-voice'), b = $('#more-voice');
+    if (a) render(a);
+    if (b) render(b);
   }
 }
 

@@ -76,8 +76,6 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 #main{grid-area:main; position:relative; overflow:hidden; display:flex; flex-direction:column}
 
 /* ---------- 顶栏 ---------- */
-.brand{display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px; margin-right:6px; white-space:nowrap}
-.brand .logo{font-size:20px}
 .tb-spacer{flex:1}
 .btn{
   display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:8px;
@@ -168,6 +166,8 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   color:var(--reader-fg);
   word-break:break-word;
   user-select:text;
+  -webkit-user-select:text;
+  -webkit-touch-callout:none; /* 移动端不弹系统选中菜单，改用自绘划词工具栏 */
 }
 #page-content .para{margin:0 0 .35em; text-indent:2em}
 #page-content.no-indent .para{text-indent:0}
@@ -187,6 +187,30 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 }
 #sel-popup .sp-btn:hover{background:rgba(255,255,255,.15)}
 #sel-popup .sp-sep{width:1px; height:14px; background:rgba(255,255,255,.25)}
+
+/* 移动端「更多」浮层 */
+#btn-more{display:none}
+#more-overlay{
+  position:fixed; inset:0; background:var(--overlay); z-index:88;
+  display:none; align-items:flex-end; justify-content:center;
+}
+#more-overlay.show{display:flex}
+.more-sheet{
+  width:min(480px,100%); max-height:78vh; overflow-y:auto;
+  background:var(--bg2); color:var(--fg); border-radius:16px 16px 0 0;
+  padding:12px 14px calc(18px + env(safe-area-inset-bottom));
+  box-shadow:var(--shadow); animation:toastIn .2s ease;
+}
+.more-head{display:flex; align-items:center; padding:4px 2px 10px; font-weight:700; font-size:14px}
+.more-head span{flex:1}
+.more-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px}
+.more-grid button{
+  padding:12px 4px; border-radius:10px; background:var(--btn-bg); color:var(--btn-fg);
+  font-size:13px; border:1px solid transparent; white-space:nowrap;
+}
+.more-grid button:active{transform:scale(.96)}
+.more-row{display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--muted)}
+.more-row select{flex:1; min-width:0}
 
 /* 底部/右侧点击翻页热区 */
 .hot-zone{position:absolute; top:0; bottom:0; width:26%; z-index:5; cursor:pointer}
@@ -241,7 +265,8 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   width:min(540px,100%); max-height:88vh; display:flex; flex-direction:column;
   animation:popIn .18s ease;
 }
-.modal-head{display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--line)}
+.modal-head{display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--line);
+  cursor:move; touch-action:none; user-select:none; -webkit-user-select:none}
 .modal-head h3{font-size:16px; flex:1}
 .modal-body{padding:16px 18px; overflow-y:auto}
 .modal-foot{display:flex; justify-content:flex-end; gap:10px; padding:12px 18px; border-top:1px solid var(--line)}
@@ -313,9 +338,31 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   #page-content{padding-top:20px; padding-bottom:24px}
   .bt-hide-sm{display:none}
 }
-@media (max-width:560px){
-  .brand .brand-sub{display:none}
-  .rt-toc, .rt-chapnav{display:none}
+/* ---------- 手机端 ---------- */
+@media (max-width:620px){
+  /* 阅读工具栏：核心图标常显（目录 / 上一章 / 下一章 / 播放），次要项收纳进「⋯」浮层 */
+  #btn-more{display:inline-flex}
+  .rtoolbar{gap:4px; padding:6px 8px}
+  .rt-title{min-width:56px; font-size:13px}
+  .rt-gap, #tts-rate, #tts-voice,
+  .rt-page-label, #btn-page-prev, #btn-page-next, .rt-percent{display:none}
+  /* 顶栏：导入按钮压缩为图标，隐藏文字按钮 */
+  #topbar{gap:4px; padding:0 8px}
+  #btn-import, #btn-export, #btn-import-backup{font-size:0}
+  #btn-import::before, #btn-export::before, #btn-import-backup::before{font-size:15px}
+  #btn-import::before{content:'⬆'} #btn-export::before{content:'⇩'} #btn-import-backup::before{content:'⇧'}
+  /* 设置表单单列 */
+  .form-grid{grid-template-columns:1fr}
+  /* 状态栏收窄 */
+  #statusbar{gap:8px; padding:0 10px}
+  #statusbar #st-chapter, #statusbar #st-tts{display:none}
+  #statusbar #st-hint{max-width:38vw; overflow:hidden; text-overflow:ellipsis}
+  /* 弹窗贴边 */
+  .modal-backdrop{padding:10px; align-items:flex-end}
+  .modal{width:100%; max-height:90vh; border-radius:14px 14px 0 0; animation:toastIn .2s ease}
+  /* 划词弹层更紧凑 */
+  #sel-popup{transform:translate(-50%,-140%); padding:4px 5px;}
+  #page-content{padding-top:16px; padding-bottom:20px}
 }
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important; animation:none!important}

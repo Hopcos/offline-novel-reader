@@ -4,7 +4,6 @@
   <!-- ===== 顶栏 ===== -->
   <header id="topbar">
     <button class="btn ghost icon" id="toggle-sidebar" data-i18n-title="tocTitle">☰</button>
-    <div class="brand"><span class="logo">📖</span><span data-i18n="appName">离线小说阅读器</span></div>
     <div class="tb-spacer"></div>
     <button class="btn primary" id="btn-import" data-i18n-title="impTitle" data-i18n="btnImport">⬆ 导入小说</button>
     <button class="btn ghost icon" id="btn-paste" data-i18n-title="pasteTitle">📋</button>
@@ -53,6 +52,7 @@
         <span class="rt-page-label" id="rt-page">1 / 1</span>
         <button class="btn icon" id="btn-page-next" data-i18n-title="pageNextTitle">›</button>
         <span class="rt-percent" id="rt-percent" data-i18n-title="percentTitle">0%</span>
+        <button class="btn ghost icon" id="btn-more" data-i18n-title="moreTitle">⋯</button>
       </div>
       <div id="page-frame">
         <div id="page-content" tabindex="0"></div>
@@ -88,6 +88,31 @@
 
 <!-- ===== 划词弹出工具栏 ===== -->
 <div id="sel-popup"></div>
+
+<!-- ===== 移动端「更多」浮层 ===== -->
+<div id="more-overlay">
+  <div class="more-sheet">
+    <div class="more-head"><span data-i18n="moreTitle">更多功能</span><button class="btn ghost icon" id="more-close">✕</button></div>
+    <div class="more-grid">
+      <button data-for="#btn-toc" data-i18n="tocTitle">目录</button>
+      <button data-for="#btn-chap-prev" data-i18n="chapPrevTitle">上一章</button>
+      <button data-for="#btn-chap-next" data-i18n="chapNextTitle">下一章</button>
+      <button data-for="#tts-play" data-i18n="ttsPlayTitle">朗读</button>
+      <button data-for="#tts-stop" data-i18n="ttsStopTitle">停止</button>
+      <button data-for="#btn-page-prev" data-i18n="pagePrevTitle">上一页</button>
+      <button data-for="#btn-page-next" data-i18n="pageNextTitle">下一页</button>
+      <button data-for="#btn-settings" data-i18n="settingsTitle">设置</button>
+      <button data-for="#btn-help" data-i18n="helpTitle">帮助</button>
+      <button data-for="#btn-export" data-i18n="btnExport">导出备份</button>
+      <button data-for="#btn-import-backup" data-i18n="btnImpBack">导入备份</button>
+      <button data-for="#btn-paste" data-i18n="pasteTitle">粘贴导入</button>
+      <button data-for="#btn-import" data-i18n="btnImport">导入小说</button>
+      <button data-for="#btn-lang" data-i18n="langSwitch">语言</button>
+    </div>
+    <div class="more-row"><label data-i18n="ttsRateTitle">朗读语速</label><select id="more-rate" class="mini"></select></div>
+    <div class="more-row"><label data-i18n="ttsVoiceTitle">发音人</label><select id="more-voice" class="mini"></select></div>
+  </div>
+</div>
 
 <!-- ===== 目录 ===== -->
 <div class="modal-backdrop" id="dlg-chapters" style="display:none">
@@ -302,6 +327,7 @@ const I18N_LANGS = {
     settingsTitle: '阅读设置',
     helpTitle: '帮助',
     langSwitch: '切换界面语言（中 / EN）',
+    moreTitle: '更多功能',
     // 侧栏
     searchPh: '搜索书名 / 作者…',
     dbInit: '数据库…',
@@ -505,6 +531,7 @@ const I18N_LANGS = {
     settingsTitle: 'Reader settings',
     helpTitle: 'Help',
     langSwitch: 'Switch UI language (English / 中文)',
+    moreTitle: 'More',
     searchPh: 'Search title / author…',
     dbInit: 'Database…',
     workerInit: 'Thread:—',

@@ -144,6 +144,10 @@ class ChapterPager {
     this.font = breaker.fontString(fontSize, fontFamily);
     this.lineH = Math.round(fontSize * lineHeight);
     this.availH = Math.max(60, pageH - vPad * 2);
+    // 段落底部间距（与 CSS .para margin-bottom:.35em 一致），分页时计入避免最后一行被裁切
+    this.paraGap = Math.round(fontSize * 0.35);
+    // 底部再保留一行留白：杜绝分数行高 / 舍入误差导致的最后 1~2 行被 overflow:hidden 吞掉
+    this.budgetH = Math.max(40, this.availH - this.lineH);
     this.maxLines = Math.max(1, Math.floor(this.availH / this.lineH));
   }
 
@@ -152,6 +156,7 @@ class ChapterPager {
     let group = [];          // 正在填充的页
     let groupStartChar = 0;
     let groupChars = 0;
+    let used = 0;            // 当前页已占用的垂直高度(px)
     let charTotal = 0;       // 已排入行的章节字符数（供 percent 用）
     const flush = () => {
       if (!group.length) return;
@@ -162,6 +167,7 @@ class ChapterPager {
       });
       group = [];
       groupChars = 0;
+      used = 0;
     };
     let lineCount = 0;
     const maxW = Math.max(80, this.pageW); // pageW 已扣除内边距
@@ -169,7 +175,6 @@ class ChapterPager {
     for (let p = 0; p < paras.length; p++) {
       const text = paras[p];
       if (!text) continue;
-      if (group.length === 0) groupStartChar = charTotal;
       let paraLines = [];
       try {
         paraLines = await this.breaker.breakLines(text, maxW, this.font, this.fontSize);
@@ -178,9 +183,15 @@ class ChapterPager {
         paraLines = [[0, text.length]];
       }
       for (const [s, e] of paraLines) {
-        if (group.length >= this.maxLines) flush();
-        if (group.length === 0) groupStartChar = charTotal;
+        // 新段落首行额外计入段落间距（跨页段落由 .para.tight 去间距，只会更宽松）
+        const gap = (group.length > 0 && s === 0) ? this.paraGap : 0;
+        const need = this.lineH + gap;
+        if (group.length > 0 && used + need > this.budgetH) {
+          flush();
+          groupStartChar = charTotal;
+        }
         group.push({ p, s, e });
+        used += need;
         groupChars += e - s;
         charTotal += e - s;
         lineCount++;
@@ -521,6 +532,7 @@ class Reader {
   }
 
   async _readCurrentPage() {
+    if (!this.book || !this.chapters) { toast(I18N.t('noBook')); return this.stopReading(); }
     const chapter = this.chapters[this.chapterIndex];
     const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
     const page = pages[this.pageIndex];
@@ -598,10 +610,20 @@ class Reader {
       }
     }, { passive: true });
 
-    // 划词弹层
+    // 划词弹层（移动端：抑制系统菜单，自绘 翻译 / 解释 / 朗读 / 复制 工具栏）
+    this._popupAt = 0;
     this.el.content.addEventListener('mouseup', e => this._maybeShowSelection(e));
     this.el.content.addEventListener('touchend', e => setTimeout(() => this._maybeShowSelection(e), 120), { passive: true });
+    // Android 长按会触发 contextmenu：有选区时拦截，改弹自绘工具栏
+    this.el.content.addEventListener('contextmenu', e => {
+      if (this._hasSelection()) {
+        e.preventDefault();
+        this._maybeShowSelection({ clientX: e.clientX, clientY: e.clientY });
+      }
+    });
     document.addEventListener('mousedown', e => {
+      // 触摸结束后的“合成 mousedown”会晚于自绘工具栏弹出，忽略该窗口期内的收起
+      if (Date.now() - this._popupAt < 450) return;
       if (!$('#sel-popup').contains(e.target)) this._hideSelection();
     });
 
@@ -653,6 +675,7 @@ class Reader {
       popup.style.left = x + 'px';
       popup.style.top = y + 'px';
       popup.classList.add('show');
+      this._popupAt = Date.now();
     } else {
       this._hideSelection();
     }

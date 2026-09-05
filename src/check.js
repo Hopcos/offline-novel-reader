@@ -134,6 +134,7 @@ const I18N_LANGS = {
     settingsTitle: '阅读设置',
     helpTitle: '帮助',
     langSwitch: '切换界面语言（中 / EN）',
+    moreTitle: '更多功能',
     // 侧栏
     searchPh: '搜索书名 / 作者…',
     dbInit: '数据库…',
@@ -337,6 +338,7 @@ const I18N_LANGS = {
     settingsTitle: 'Reader settings',
     helpTitle: 'Help',
     langSwitch: 'Switch UI language (English / 中文)',
+    moreTitle: 'More',
     searchPh: 'Search title / author…',
     dbInit: 'Database…',
     workerInit: 'Thread:—',
@@ -4361,6 +4363,10 @@ class ChapterPager {
     this.font = breaker.fontString(fontSize, fontFamily);
     this.lineH = Math.round(fontSize * lineHeight);
     this.availH = Math.max(60, pageH - vPad * 2);
+    // 段落底部间距（与 CSS .para margin-bottom:.35em 一致），分页时计入避免最后一行被裁切
+    this.paraGap = Math.round(fontSize * 0.35);
+    // 底部再保留一行留白：杜绝分数行高 / 舍入误差导致的最后 1~2 行被 overflow:hidden 吞掉
+    this.budgetH = Math.max(40, this.availH - this.lineH);
     this.maxLines = Math.max(1, Math.floor(this.availH / this.lineH));
   }
 
@@ -4369,6 +4375,7 @@ class ChapterPager {
     let group = [];          // 正在填充的页
     let groupStartChar = 0;
     let groupChars = 0;
+    let used = 0;            // 当前页已占用的垂直高度(px)
     let charTotal = 0;       // 已排入行的章节字符数（供 percent 用）
     const flush = () => {
       if (!group.length) return;
@@ -4379,6 +4386,7 @@ class ChapterPager {
       });
       group = [];
       groupChars = 0;
+      used = 0;
     };
     let lineCount = 0;
     const maxW = Math.max(80, this.pageW); // pageW 已扣除内边距
@@ -4386,7 +4394,6 @@ class ChapterPager {
     for (let p = 0; p < paras.length; p++) {
       const text = paras[p];
       if (!text) continue;
-      if (group.length === 0) groupStartChar = charTotal;
       let paraLines = [];
       try {
         paraLines = await this.breaker.breakLines(text, maxW, this.font, this.fontSize);
@@ -4395,9 +4402,15 @@ class ChapterPager {
         paraLines = [[0, text.length]];
       }
       for (const [s, e] of paraLines) {
-        if (group.length >= this.maxLines) flush();
-        if (group.length === 0) groupStartChar = charTotal;
+        // 新段落首行额外计入段落间距（跨页段落由 .para.tight 去间距，只会更宽松）
+        const gap = (group.length > 0 && s === 0) ? this.paraGap : 0;
+        const need = this.lineH + gap;
+        if (group.length > 0 && used + need > this.budgetH) {
+          flush();
+          groupStartChar = charTotal;
+        }
         group.push({ p, s, e });
+        used += need;
         groupChars += e - s;
         charTotal += e - s;
         lineCount++;
@@ -4738,6 +4751,7 @@ class Reader {
   }
 
   async _readCurrentPage() {
+    if (!this.book || !this.chapters) { toast(I18N.t('noBook')); return this.stopReading(); }
     const chapter = this.chapters[this.chapterIndex];
     const { pages } = this._pagesCache.get(this.chapterIndex) || { pages: [] };
     const page = pages[this.pageIndex];
@@ -4815,10 +4829,20 @@ class Reader {
       }
     }, { passive: true });
 
-    // 划词弹层
+    // 划词弹层（移动端：抑制系统菜单，自绘 翻译 / 解释 / 朗读 / 复制 工具栏）
+    this._popupAt = 0;
     this.el.content.addEventListener('mouseup', e => this._maybeShowSelection(e));
     this.el.content.addEventListener('touchend', e => setTimeout(() => this._maybeShowSelection(e), 120), { passive: true });
+    // Android 长按会触发 contextmenu：有选区时拦截，改弹自绘工具栏
+    this.el.content.addEventListener('contextmenu', e => {
+      if (this._hasSelection()) {
+        e.preventDefault();
+        this._maybeShowSelection({ clientX: e.clientX, clientY: e.clientY });
+      }
+    });
     document.addEventListener('mousedown', e => {
+      // 触摸结束后的“合成 mousedown”会晚于自绘工具栏弹出，忽略该窗口期内的收起
+      if (Date.now() - this._popupAt < 450) return;
       if (!$('#sel-popup').contains(e.target)) this._hideSelection();
     });
 
@@ -4870,6 +4894,7 @@ class Reader {
       popup.style.left = x + 'px';
       popup.style.top = y + 'px';
       popup.classList.add('show');
+      this._popupAt = Date.now();
     } else {
       this._hideSelection();
     }
@@ -5162,6 +5187,8 @@ class App {
     this.data.setSetting('lastBookId', id).catch(() => {});
     this._renderBookList();
     await this.reader.openBook(book);
+    // 打开书籍后收起书库面板（移动端抽屉）
+    $('#sidebar').classList.remove('open');
     $('#st-book').textContent = book.title;
     this.bus.emit('app:book-open', book);
   }
@@ -5298,6 +5325,9 @@ class App {
     this._dictQuery = text;
     $('#dict-input').value = text;
     $('#dict-panel').classList.add('open');
+    const mo = $('#more-overlay'); if (mo) mo.classList.remove('show');
+    // 清掉正文残留选区，避免随后触摸再次弹出划词工具栏
+    try { const s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) { /* noop */ }
     this._renderDict();
   }
 
@@ -5661,18 +5691,92 @@ class App {
     window.addEventListener('beforeunload', () => {
       try { this.reader._persistPosition(); } catch (e) { /* noop */ }
     });
+
+    // ---------- 移动端「更多」浮层 ----------
+    $('#btn-more').onclick = (e) => { e.stopPropagation(); $('#more-overlay').classList.add('show'); };
+    $('#more-close').onclick = () => $('#more-overlay').classList.remove('show');
+    $('#more-overlay').querySelectorAll('[data-for]').forEach(b => {
+      b.onclick = (ev) => {
+        ev.stopPropagation();
+        $('#more-overlay').classList.remove('show');
+        const t = document.querySelector(b.dataset.for);
+        if (t && typeof t.click === 'function') t.click();
+      };
+    });
+    $('#more-rate').onchange = e => {
+      this.setSetting('ttsRate', parseFloat(e.target.value));
+      const t = $('#tts-rate'); if (t) t.value = e.target.value;
+    };
+    $('#more-voice').onchange = e => {
+      this.setSetting('ttsVoice', e.target.value);
+      this.reader.tts.setVoice(e.target.value);
+      const t = $('#tts-voice'); if (t) t.value = e.target.value;
+    };
+
+    // ---------- 点击面板以外任意位置自动关闭（侧栏 / 词典面板 / 更多浮层） ----------
+    document.addEventListener('pointerdown', e => {
+      const sb = $('#sidebar');
+      if (sb.classList.contains('open') && !sb.contains(e.target) && e.target.id !== 'toggle-sidebar') {
+        sb.classList.remove('open');
+      }
+      const dp = $('#dict-panel');
+      if (dp.classList.contains('open') && !dp.contains(e.target) && !$('#sel-popup').contains(e.target)) {
+        dp.classList.remove('open');
+      }
+      const mo = $('#more-overlay');
+      if (mo.classList.contains('show') && !mo.contains(e.target)) mo.classList.remove('show');
+    }, { passive: true });
+
+    // ---------- 设置等弹窗可拖动（拖标题栏） ----------
+    for (const m of document.querySelectorAll('.modal-backdrop > .modal')) this._makeDraggable(m);
+  }
+
+  /** 让弹窗可拖动：按住标题栏拖动 */
+  _makeDraggable(modal) {
+    const head = modal.querySelector('.modal-head');
+    if (!head) return;
+    let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    head.addEventListener('pointerdown', e => {
+      if (e.button !== undefined && e.button !== 0) return;
+      dragging = true;
+      const r = modal.getBoundingClientRect();
+      modal.style.position = 'fixed';
+      modal.style.margin = '0';
+      modal.style.left = r.left + 'px';
+      modal.style.top = r.top + 'px';
+      ox = r.left; oy = r.top; sx = e.clientX; sy = e.clientY;
+      if (head.setPointerCapture) { try { head.setPointerCapture(e.pointerId); } catch (err) { /* noop */ } }
+      try { e.preventDefault(); } catch (err) { /* noop */ }
+    });
+    head.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const w = modal.offsetWidth, h = modal.offsetHeight;
+      const x = clampNum(ox + (e.clientX - sx), 12 - w + 96, Math.max(12, window.innerWidth - 12));
+      const y = clampNum(oy + (e.clientY - sy), 8, Math.max(8, window.innerHeight - 56));
+      modal.style.left = x + 'px';
+      modal.style.top = y + 'px';
+    });
+    const stopDrag = () => {
+      dragging = false;
+      if (head.releasePointerCapture) { try { head.releasePointerCapture(head.pointerId); } catch (err) { /* noop */ } }
+    };
+    head.addEventListener('pointerup', stopDrag);
+    head.addEventListener('pointercancel', stopDrag);
   }
 
   _fillRateSelect(idSel) {
-    const sel = $(idSel);
-    if (!sel) return;
-    sel.innerHTML = '';
-    for (const r of ['0.5', '0.75', '1', '1.25', '1.5', '1.75', '2']) {
-      const o = document.createElement('option');
-      o.value = r; o.textContent = r + 'x';
-      sel.appendChild(o);
+    // 桌面工具栏 + 移动端「更多」浮层里的语速下拉同源填充
+    for (const id of [idSel, '#more-rate']) {
+      const sel = $(id);
+      if (!sel) continue;
+      sel.innerHTML = '';
+      for (const r of ['0.5', '0.75', '1', '1.25', '1.5', '1.75', '2']) {
+        const o = document.createElement('option');
+        o.value = r; o.textContent = r + 'x';
+        sel.appendChild(o);
+      }
+      sel.value = String(this.settings.ttsRate);
     }
-    sel.value = String(this.settings.ttsRate);
   }
   /** 填充设置里的数值型下拉：字号 / 行距 / 页宽 */
   _fillSettingSelects() {
@@ -5698,18 +5802,23 @@ class App {
     sel.value = String(current);
   }
   _fillVoiceSelect(voices) {
-    const sel = $('#tts-voice');
-    sel.innerHTML = '<option value="">' + I18N.t('defaultVoice') + '</option>';
-    const zh = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
-    const rest = voices.filter(v => !(v.lang && v.lang.toLowerCase().startsWith('zh')));
-    const add = v => {
-      const o = document.createElement('option');
-      o.value = v.voiceURI;
-      o.textContent = `${v.name} (${v.lang})`;
-      sel.appendChild(o);
+    // 桌面工具栏 + 移动端「更多」浮层里的发音人下拉同源填充
+    const render = (sel) => {
+      sel.innerHTML = '<option value="">' + I18N.t('defaultVoice') + '</option>';
+      const zh = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('zh'));
+      const rest = voices.filter(v => !(v.lang && v.lang.toLowerCase().startsWith('zh')));
+      const add = (sel, v) => {
+        const o = document.createElement('option');
+        o.value = v.voiceURI;
+        o.textContent = `${v.name} (${v.lang})`;
+        sel.appendChild(o);
+      };
+      zh.forEach(v => add(sel, v)); rest.forEach(v => add(sel, v));
+      sel.value = this.settings.ttsVoice || '';
     };
-    zh.forEach(add); rest.forEach(add);
-    sel.value = this.settings.ttsVoice || '';
+    const a = $('#tts-voice'), b = $('#more-voice');
+    if (a) render(a);
+    if (b) render(b);
   }
 }
 
