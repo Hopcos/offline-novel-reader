@@ -130,9 +130,11 @@ function check(name, cond, detail) {
     const trCn = dict.translate('好好学习，天天向上');
     check('cn translate yields segments', trCn.segments.length >= 4, String(trCn.segments.length));
     check('cn translate has glosses', trCn.segments.some(s => s.gloss), JSON.stringify(trCn.segments.slice(0, 4)));
-    const trEn = dict.translate('I look forward to this great day');
-    check('en translate phrase match', trEn.glossText.includes('期待'), trEn.glossText);
+    const trEn = dict.translate('look forward to this great day');
+    check('en translate phrase match', trEn.glossText.includes('期望'), trEn.glossText);
     check('en translate unknown tracking', Array.isArray(trEn.unknown) && trEn.unknown.length === 0, JSON.stringify(trEn.unknown));
+    const trRare = dict.translate('ubiquitous zephyr');
+    check('rare words tracked as unknown', trRare.unknown.length === 2 && trRare.unknown.includes('ubiquitous'), JSON.stringify(trRare.unknown));
     const ex = dict.explain('一见钟情');
     check('idiom found in explain', ex && ex.idiom && ex.idiom.word === '一见钟情', JSON.stringify(ex && ex.idiom));
     const ex2 = dict.explain('这个人很厉害');
@@ -150,6 +152,39 @@ function check(name, cond, detail) {
     };
     const found = scan('他这个人总是一见钟情，真是令人敬佩。');
     check('idiom tab scan finds idiom', found.includes('一见钟情'), JSON.stringify(found));
+    // 中文释义词典 zh
+    check('zh dict size', dict.maps.zh.size >= 150, String(dict.maps.zh.size));
+    const zhg = dict.maps.zh.get('刹那');
+    check('zh gloss content', typeof zhg === 'string' && /瞬间/.test(zhg), zhg);
+    const ex3 = dict.explain('他踌躇片刻，转身离去。');
+    const cz = ex3.words.find(w => w.word === '踌躇');
+    check('explain prefers zh gloss for 踌躇', !!(cz && /犹豫/.test(cz.gloss)), JSON.stringify(cz));
+    const trZh = dict.translate('刹那之间，他踌躇不前。');
+    check('cn translate glossed segments', trZh.segments.some(s => s.gloss), JSON.stringify(trZh.segments.slice(0, 6)));
+    check('cn2en now covers 踌躇', dict.maps.cn2en.has('踌躇') && dict.maps.cn2en.has('刹那'));
+    // 新词典规模与常用词覆盖（ECDICT 英→中 5000 / CEDICT 中→英 7000+）
+    check('en2cn large', dict.maps.en2cn.size >= 4500, String(dict.maps.en2cn.size));
+    check('cn2en large', dict.maps.cn2en.size >= 7000, String(dict.maps.cn2en.size));
+    check('en2cn has computer', /电脑/.test(dict.maps.en2cn.get('computer') || ''), dict.maps.en2cn.get('computer'));
+    check('en2cn phrase look forward to', dict.maps.en2cn.has('look forward to'));
+    check('cn2en covers 图书馆', dict.maps.cn2en.get('图书馆') === 'library', dict.maps.cn2en.get('图书馆'));
+    check('cn2en covers 老师', dict.maps.cn2en.get('老师') === 'teacher', dict.maps.cn2en.get('老师'));
+    check('cn2en covers 美国', /United States/.test(dict.maps.cn2en.get('美国') || ''), dict.maps.cn2en.get('美国'));
+    check('cn2en covers 机会', dict.maps.cn2en.has('机会'));
+    check('explain stays Chinese for zh words', /^[\u4e00-\u9fff，。、；;：:（）()…！？!?]+$/.test(dict.maps.zh.get('踌躇') || ''));
+    // 解释面板保持中文：除 cn2en 显式兜底外，gloss 不得含拉丁字母
+    const exAll = dict.explain('大家都很高兴，觉得很幸福。');
+    const enInZh = exAll.words.filter(w => w.src !== 'cn2en' && /[A-Za-z]/.test(w.gloss));
+    check('explain stays Chinese except cn2en fallback', enInZh.length === 0, JSON.stringify(enInZh));
+    check('zh-sourced explain words dominate', exAll.words.filter(w => w.src === 'zh').length >= 4, JSON.stringify(exAll.words.slice(0, 8)));
+    // 逐字中文兜底：找一个 cn2en 有、zh 没有、且每字都在 chars 中的二字词
+    const miss = [...dict.maps.cn2en.keys()].find(k => k.length === 2 && !dict.maps.zh.has(k) && [...k].every(c => dict.maps.chars.has(c)));
+    if (miss) {
+      const it = dict.explain(miss).words.find(w => w.word === miss);
+      check('chars fallback gives Chinese gloss', !!it && it.src !== 'cn2en' && !/[A-Za-z]/.test(it.gloss || ''), JSON.stringify(it));
+    }
+    check('zh dict batch2 has 高兴', dict.maps.zh.has('高兴'), '高兴 missing');
+    check('zh dict batch2 has 办法', dict.maps.zh.has('办法'), '办法 missing');
     // custom entry precedence
     await dict.addCustomEntry('幻辰诀', 'a legendary technique from my novel');
     const lk = dict.lookup('幻辰诀', 'cn2en');

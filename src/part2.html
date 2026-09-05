@@ -44,7 +44,6 @@
         <button class="btn ghost icon rt-chapnav" id="btn-chap-next" data-i18n-title="chapNextTitle">»</button>
         <span class="rt-gap"></span>
         <button class="btn icon" id="tts-play" data-i18n-title="ttsPlayTitle">▶</button>
-        <button class="btn icon" id="tts-stop" data-i18n-title="ttsStopTitle" disabled>■</button>
         <select class="mini" id="tts-rate" data-i18n-title="ttsRateTitle"></select>
         <select class="mini bt-hide-sm" id="tts-voice" data-i18n-title="ttsVoiceTitle" style="max-width:132px"></select>
         <span class="rt-gap"></span>
@@ -68,14 +67,14 @@
     <span id="st-chapter"></span>
     <span id="st-tts"></span>
     <span style="flex:1"></span>
-    <span id="st-hint" data-i18n="stHint">划选正文 → 翻译 / 解释 / 朗读 · 键盘 ← → 翻页</span>
+    <span id="st-hint" data-i18n="stHint">划选正文 → 翻译 / 朗读 · 键盘 ← → 翻页</span>
   </footer>
 </div>
 
 <!-- ===== 词典 / 翻译面板 ===== -->
 <aside id="dict-panel">
   <div class="dict-head">
-    <span class="dh-title" data-i18n="dictTitle">📚 词典 · 翻译 / 解释</span>
+    <span class="dh-title" data-i18n="dictTitle">📚 词典 · 翻译</span>
     <button class="btn ghost icon" id="dict-close">✕</button>
   </div>
   <div class="dict-query">
@@ -98,7 +97,6 @@
       <button data-for="#btn-chap-prev" data-i18n="chapPrevTitle">上一章</button>
       <button data-for="#btn-chap-next" data-i18n="chapNextTitle">下一章</button>
       <button data-for="#tts-play" data-i18n="ttsPlayTitle">朗读</button>
-      <button data-for="#tts-stop" data-i18n="ttsStopTitle">停止</button>
       <button data-for="#btn-page-prev" data-i18n="pagePrevTitle">上一页</button>
       <button data-for="#btn-page-next" data-i18n="pageNextTitle">下一页</button>
       <button data-for="#btn-settings" data-i18n="settingsTitle">设置</button>
@@ -151,7 +149,7 @@
       <div class="form-check"><input type="checkbox" id="set-hitzone"><label data-i18n="setHitZone">点击页面左右两侧边翻页</label></div>
       <div class="form-check"><input type="checkbox" id="set-indent"><label data-i18n="setIndent">段落首行缩进两字符</label></div>
       <div class="form-row"><label data-i18n="setSelAction">划词操作</label>
-        <select id="set-selaction"><option value="popup" data-i18n="setSelPopup">弹出工具栏（翻译 / 解释 / 朗读）</option><option value="auto" data-i18n="setSelAuto">划词后自动打开词典翻译</option></select></div>
+        <select id="set-selaction"><option value="popup" data-i18n="setSelPopup">弹出工具栏（翻译 / 朗读）</option><option value="auto" data-i18n="setSelAuto">划词后自动打开词典翻译</option></select></div>
       <p class="muted-text" style="font-size:12px;line-height:1.8" data-i18n="setNote">设置与阅读进度会自动保存到浏览器数据库；「导出备份」会包含全部书籍内容、进度与自定义词条。</p>
     </div>
     <div class="modal-foot"><button class="btn primary" data-close data-i18n="doneBtn">完成</button></div>
@@ -346,8 +344,7 @@ const I18N_LANGS = {
     tocTitle: '目录',
     chapPrevTitle: '上一章',
     chapNextTitle: '下一章',
-    ttsPlayTitle: '从当前页开始朗读',
-    ttsStopTitle: '停止朗读',
+    ttsPlayTitle: '从当前页开始朗读（朗读中再点停止）',
     ttsRateTitle: '朗读语速',
     ttsVoiceTitle: '发音人',
     pagePrevTitle: '上一页 (←)',
@@ -355,23 +352,27 @@ const I18N_LANGS = {
     percentTitle: '全书进度',
     hzPageTitle: '翻页（点击）',
     noBook: '未打开书籍',
-    stHint: '划选正文 → 翻译 / 解释 / 朗读 · 键盘 ← → 翻页',
+    stHint: '划选正文 → 翻译 / 朗读 · 键盘 ← → 翻页',
     stReading: '🔊 朗读中…',
     lastPage: '已是最后一页',
     firstPage: '已是第一页',
     lastChapter: '已是最后一章',
     firstChapter: '已是第一章',
     // 词典面板
-    dictTitle: '📚 词典 · 翻译 / 解释',
+    dictTitle: '📚 词典 · 翻译',
     dictInputPh: '输入或划选文字，回车查询…',
     dictGo: '查询',
     dictNeedQuery: '请输入要查询的文字',
     dictEmptyHtml: '在正文中划选文字，或在上方输入查询。<br>词典数据完全离线打包在本页面中。',
     d_en2cn: '英译中', d_hint_en2cn: '英语单词/短语 → 中文释义',
     d_cn2en: '中译英', d_hint_cn2en: '中文常用词 → 英语释义',
+    d_zh: '中文释义', d_hint_zh: '常用中文词汇 → 中文释义',
     d_idioms: '成语', d_hint_idioms: '四字成语 / 惯用语释义',
     d_chars: '汉字', d_hint_chars: '常见汉字 → 简明释义',
-    dictLineGloss: '整句逐词释义',
+    tagZh: '中文释义',
+    dictZhEmpty: '中文释义仅适用于中文文本',
+    dictZhNone: '暂未收录这些词的中文释义',
+    dictZhTitle: '中文释义 · {hit} 个词',
     dictEnEmpty: '当前查询不是英文，请在「中译英」中查看。',
     dictEnTitle: '英 → 中（词典命中 {hit}/{total} 词）',
     dictUnknown: '未收录词',
@@ -384,15 +385,8 @@ const I18N_LANGS = {
     charsTitle: '逐字详解（{hit}/{total} 字已收录）',
     tagChar: '汉字',
     charsMissing: '未收录字',
-    explainIdiom: '成语',
-    explainWords: '词语解析',
-    explainChars: '逐字详解',
-    explainUnknown: '未收录汉字',
-    explainHeader: '📖 中文解释',
-    explainCnOnly: '解释功能仅针对中文文本（英文请用「翻译」）',
     // 划词
     selTranslate: '翻译',
-    selExplain: '解释',
     selSpeak: '朗读',
     selCopy: '复制',
     copied: '已复制',
@@ -417,7 +411,7 @@ const I18N_LANGS = {
     setHitZone: '点击页面左右两侧边翻页',
     setIndent: '段落首行缩进两字符',
     setSelAction: '划词操作',
-    setSelPopup: '弹出工具栏（翻译 / 解释 / 朗读）',
+    setSelPopup: '弹出工具栏（翻译 / 朗读）',
     setSelAuto: '划词后自动打开词典翻译',
     setNote: '设置与阅读进度会自动保存到浏览器数据库；「导出备份」会包含全部书籍内容、进度与自定义词条。',
     doneBtn: '完成',
@@ -429,8 +423,8 @@ const I18N_LANGS = {
       '<p>书籍与阅读位置保存在浏览器 IndexedDB 中，自动持久化，刷新不丢失。</p>' +
       '<h4>换设备迁移</h4>' +
       '<p>旧设备：<b>导出备份</b> → 得到 backup.json；新设备：打开本页面 → <b>导入备份</b> → 全部书籍 + 进度恢复。</p>' +
-      '<h4>划词 · 翻译 · 解释</h4>' +
-      '<p>在正文中划选文字，弹出工具栏：<b>翻译</b>（英↔中，右侧词典面板）、<b>解释</b>（中文词义 / 成语 / 逐字详解）、<b>朗读</b>（朗读选中片段）。全部离线完成。</p>' +
+      '<h4>划词 · 翻译</h4>' +
+      '<p>在正文中划选文字，弹出工具栏：<b>翻译</b>（英↔中，右侧词典面板）、<b>朗读</b>（朗读选中片段）。全部离线完成。</p>' +
       '<h4>朗读</h4>' +
       '<p>使用浏览器原生语音合成；点击 ▶ 从当前页连续朗读，朗读到页尾自动翻页；可调节语速与发音人。</p>' +
       '<h4>快捷键与手势</h4>' +
@@ -438,7 +432,7 @@ const I18N_LANGS = {
       '<div class="key-row"><span><kbd>Home</kbd> / <kbd>End</kbd></span><span>章首 / 章末</span></div>' +
       '<div class="key-row"><span>移动端：左右滑动</span><span>翻页</span></div>' +
       '<div class="key-row"><span>「☰」按钮</span><span>打开 / 收起书库</span></div>' +
-      '<div class="key-row"><span>长按 / 划选文字</span><span>翻译、解释、朗读</span></div>' +
+      '<div class="key-row"><span>长按 / 划选文字</span><span>翻译、朗读</span></div>' +
       '<h4>性能说明</h4>' +
       '<p>章节切分在后台 Web Worker 线程异步执行（多线程），主界面不卡顿；分页排版采用测量分页，翻页流畅。</p>',
     // 确认框 / 进度
@@ -547,8 +541,7 @@ const I18N_LANGS = {
     tocTitle: 'Table of contents',
     chapPrevTitle: 'Previous chapter',
     chapNextTitle: 'Next chapter',
-    ttsPlayTitle: 'Read aloud from this page',
-    ttsStopTitle: 'Stop reading',
+    ttsPlayTitle: 'Read aloud from this page (tap again to stop)',
     ttsRateTitle: 'Reading speed',
     ttsVoiceTitle: 'Voice',
     pagePrevTitle: 'Previous page (←)',
@@ -556,22 +549,26 @@ const I18N_LANGS = {
     percentTitle: 'Whole-book progress',
     hzPageTitle: 'Turn page (tap)',
     noBook: 'No book open',
-    stHint: 'Select text → translate / explain / speak · ← → keys turn pages',
+    stHint: 'Select text → translate / speak · ← → keys turn pages',
     stReading: '🔊 Reading…',
     lastPage: 'This is the last page',
     firstPage: 'This is the first page',
     lastChapter: 'This is the last chapter',
     firstChapter: 'This is the first chapter',
-    dictTitle: '📚 Dictionary · Translate / Explain',
+    dictTitle: '📚 Dictionary · Translate',
     dictInputPh: 'Type or select text, press Enter…',
     dictGo: 'Look up',
     dictNeedQuery: 'Please enter text to look up',
     dictEmptyHtml: 'Select text in the reader, or type a query above.<br>All dictionary data is bundled offline in this page.',
     d_en2cn: 'EN→CN', d_hint_en2cn: 'English words / phrases → Chinese',
     d_cn2en: 'CN→EN', d_hint_cn2en: 'Chinese words → English',
+    d_zh: 'Chinese defs', d_hint_zh: 'Common Chinese words → Chinese definitions',
     d_idioms: 'Idioms', d_hint_idioms: '4-character idioms & set phrases',
     d_chars: 'Hanzi', d_hint_chars: 'Common Chinese characters, plain meanings',
-    dictLineGloss: 'Word-by-word gloss',
+    tagZh: '中文释义',
+    dictZhEmpty: 'Chinese definitions work for Chinese text',
+    dictZhNone: 'No Chinese definitions for these words yet',
+    dictZhTitle: 'Chinese definitions · {hit} words',
     dictEnEmpty: 'This query is not English — see the CN→EN tab.',
     dictEnTitle: 'EN → CN ({hit}/{total} words found)',
     dictUnknown: 'Unknown words',
@@ -584,14 +581,7 @@ const I18N_LANGS = {
     charsTitle: 'Per-character detail ({hit}/{total} chars covered)',
     tagChar: 'char',
     charsMissing: 'Chars not covered',
-    explainIdiom: 'Idiom',
-    explainWords: 'Word breakdown',
-    explainChars: 'Per-character',
-    explainUnknown: 'Chars not covered',
-    explainHeader: '📖 Chinese explanation',
-    explainCnOnly: 'Explain works for Chinese text (use Translate for English)',
     selTranslate: 'Translate',
-    selExplain: 'Explain',
     selSpeak: 'Speak',
     selCopy: 'Copy',
     copied: 'Copied',
@@ -614,7 +604,7 @@ const I18N_LANGS = {
     setHitZone: 'Tap left/right edges of the page to turn pages',
     setIndent: 'Indent the first line of each paragraph',
     setSelAction: 'Selection action',
-    setSelPopup: 'Show toolbar (translate / explain / speak)',
+    setSelPopup: 'Show toolbar (translate / speak)',
     setSelAuto: 'Auto-open dictionary on selection',
     setNote: 'Settings & progress are saved to the browser database automatically; "Export backup" includes all books, progress and custom entries.',
     doneBtn: 'Done',
@@ -625,8 +615,8 @@ const I18N_LANGS = {
       '<p>Books and reading positions are stored in the browser IndexedDB automatically and survive refreshes.</p>' +
       '<h4>Moving devices</h4>' +
       '<p>Old device: <b>Export backup</b> → get backup.json; new device: open this page → <b>Import backup</b> → all books + progress restored.</p>' +
-      '<h4>Select · translate · explain</h4>' +
-      '<p>Select any text in the reader and a toolbar offers <b>Translate</b> (EN↔CN, dictionary panel on the right), <b>Explain</b> (word meanings / idioms / per-character), and <b>Speak</b>. All offline.</p>' +
+      '<h4>Select · translate</h4>' +
+      '<p>Select any text in the reader and a toolbar offers <b>Translate</b> (EN↔CN, dictionary panel on the right) and <b>Speak</b>. All offline.</p>' +
       '<h4>Text-to-speech</h4>' +
       '<p>Uses the browser native speech synthesis; click ▶ to read continuously from the current page with automatic page turns; adjust speed and voice.</p>' +
       '<h4>Shortcuts & gestures</h4>' +
@@ -634,7 +624,7 @@ const I18N_LANGS = {
       '<div class="key-row"><span><kbd>Home</kbd> / <kbd>End</kbd></span><span>Chapter start / end</span></div>' +
       '<div class="key-row"><span>Mobile: swipe left / right</span><span>Turn pages</span></div>' +
       '<div class="key-row"><span>«☰» button</span><span>Open / close the library</span></div>' +
-      '<div class="key-row"><span>Select text</span><span>Translate, explain, speak</span></div>' +
+      '<div class="key-row"><span>Select text</span><span>Translate, speak</span></div>' +
       '<h4>Performance</h4>' +
       '<p>Chapter splitting runs asynchronously on a background Web Worker thread (multithreading), so the UI stays smooth; pagination is measured for fluid page turns.</p>',
     cfTitle: 'Confirm',

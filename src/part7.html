@@ -338,9 +338,6 @@ class App {
       case 'translate':
         this._openDictPanel(text, 'translate', auto);
         break;
-      case 'explain':
-        this._openDictPanel(text, 'explain', auto);
-        break;
       case 'speak':
         this._speakSelection(text);
         break;
@@ -434,43 +431,10 @@ class App {
     // 来源文本
     html += `<div class="dict-src-text"><q>${escapeHtml(q.length > 120 ? q.slice(0, 120) + '…' : q)}</q></div>`;
 
-    // 翻译模式：按语言方向自动选择词典（中→英 / 英→中）；手动查词按当前标签
+    // 划词「翻译」按语言方向自动选择词典（中→英 / 英→中）；手动查词按当前标签
     const dictId = this._dictMode === 'translate' ? (trans.lang === 'cn' ? 'cn2en' : 'en2cn') : this._dictActive;
-    if (this._dictMode === 'explain') {
-      // 解释模式：展示中文解释（成语 / 词语 / 逐字 / 未收录），与「翻译」明确区分
-      if (lang !== 'cn') {
-        html += `<div class="dict-empty">${I18N.t('explainCnOnly')}</div>`;
-      } else {
-        html += `<div class="dict-title">${I18N.t('explainHeader')}</div>`;
-        if (explain && explain.idiom) {
-          html += `<div class="dict-title">${I18N.t('explainIdiom')}</div>`;
-          html += `<div class="dict-entry"><span class="w">${escapeHtml(explain.idiom.word)}</span><span class="d">${escapeHtml(explain.idiom.gloss)}</span><span class="dict-tag">${I18N.t('tagIdiom')}</span></div>`;
-        }
-        if (explain && explain.words.length) {
-          html += `<div class="dict-title">${I18N.t('explainWords')}</div>`;
-          html += explain.words.slice(0, 40).map(w =>
-            `<div class="dict-entry"><span class="w">${escapeHtml(w.word)}</span><span class="d">${escapeHtml(w.gloss)}</span><span class="dict-tag">cn2en</span></div>`).join('');
-        }
-        // 未成词的单字：逐字解释
-        const leftover = [...new Set((explain.chars || []).filter(c => c.trim()))];
-        if (leftover.length) {
-          const withG = leftover.filter(c => this.dict.maps.chars.has(c));
-          const noG = leftover.filter(c => !this.dict.maps.chars.has(c));
-          if (withG.length) {
-            html += `<div class="dict-title">${I18N.t('explainChars')}</div>`;
-            html += withG.slice(0, 30).map(c =>
-              `<div class="dict-entry"><span class="w">${escapeHtml(c)}</span><span class="d">${escapeHtml(this.dict.maps.chars.get(c))}</span><span class="dict-tag">${I18N.t('tagChar')}</span></div>`).join('');
-          }
-          if (noG.length) html += `<div class="dict-title">${I18N.t('explainUnknown')}</div><p class="muted-text">${escapeHtml(noG.slice(0, 30).join(' '))}</p>`;
-        }
-      }
-    } else {
-      // 翻译 / 查词模式：翻译给出整句词义 + 词典对照表；手动查词只给对应标签的词条
-      if (this._dictMode === 'translate') {
-        html += `<div class="dict-title">${I18N.t('dictLineGloss')}</div>`;
-        html += `<div class="dict-translate">${this._renderSegments(trans)}</div>`;
-      }
-      if (dictId === 'en2cn') {
+    // 查词视图：按方向/标签给出词典对照表
+    if (dictId === 'en2cn') {
         if (trans.lang !== 'en') {
           html += `<div class="dict-empty">${I18N.t('dictEnEmpty')}</div>`;
         } else {
@@ -486,6 +450,27 @@ class App {
           html += `<div class="dict-title">${I18N.t('dictCnTitle', { hit: trans.segments.filter(s => s.gloss).length, total: trans.segments.length })}</div>`;
           html += trans.segments.filter(s => s.gloss && s.dict === 'cn2en').map(s =>
             `<div class="dict-entry"><span class="w">${escapeHtml(s.txt)}</span><span class="d">${escapeHtml(s.gloss)}</span><span class="dict-tag">cn2en</span></div>`).join('');
+        }
+      } else if (dictId === 'zh') {
+        if (lang !== 'cn') {
+          html += `<div class="dict-empty">${I18N.t('dictZhEmpty')}</div>`;
+        } else {
+          // 用「中文释义」词典对查询做最长匹配，列出中文解释
+          const items = [];
+          const seen = new Set();
+          for (let i = 0; i < q.length && items.length < 60; i++) {
+            for (let L = Math.min(4, q.length - i); L >= 1; L--) {
+              const w = q.slice(i, i + L);
+              if (this.dict.maps.zh.has(w)) {
+                if (!seen.has(w)) { seen.add(w); items.push({ w, g: this.dict.maps.zh.get(w) }); }
+                break;
+              }
+            }
+          }
+          html += `<div class="dict-title">${I18N.t('dictZhTitle', { hit: items.length })}</div>`;
+          if (!items.length) html += `<div class="dict-empty">${I18N.t('dictZhNone')}</div>`;
+          else html += items.map(it =>
+            `<div class="dict-entry"><span class="w">${escapeHtml(it.w)}</span><span class="d">${escapeHtml(it.g)}</span><span class="dict-tag">${I18N.t('tagZh')}</span></div>`).join('');
         }
       } else if (dictId === 'idioms') {
         const items = [];
@@ -521,18 +506,8 @@ class App {
           if (without.length) html += `<div class="dict-title">${I18N.t('charsMissing')}</div><p class="muted-text">${escapeHtml(without.slice(0, 30).join(' '))}</p>`;
         }
       }
-    }
     html += this._renderCustomDict();
     out.innerHTML = html;
-  }
-
-  _renderSegments(trans) {
-    return trans.segments.map(s => {
-      if (s.gloss) {
-        return `<span class="dict-seg hit" title="${escapeHtml(s.txt + ' → ' + s.gloss)}">${escapeHtml(s.txt)}</span>`;
-      }
-      return `<span class="dict-seg miss">${escapeHtml(s.txt)}</span>`;
-    }).join('');
   }
 
   /** 自定义词条（写入 / 删除数据的功能演示） */

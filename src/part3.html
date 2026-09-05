@@ -352,6 +352,7 @@ class DictionaryService {
     return [
       { id: 'en2cn',  name: '英 译 中', hint: '英语单词/短语 → 中文释义' },
       { id: 'cn2en',  name: '中 译 英', hint: '中文常用词 → 英语释义' },
+      { id: 'zh',     name: '中文释义', hint: '常用中文词汇 → 中文释义' },
       { id: 'idioms', name: '成语解释', hint: '四字成语 / 惯用语释义' },
       { id: 'chars',  name: '汉字详解', hint: '常见汉字 → 简明释义' },
     ];
@@ -447,7 +448,8 @@ class DictionaryService {
 
   _translateCn(text) {
     const segs = [];
-    const keyset = new Set([...this.maps.cn2en.keys()].filter(k => k.length <= 4));
+    // 分词词表 = cn2en + 中文释义(zh)；释义优先英译，无则用中文释义兜底
+    const keyset = new Set([...this.maps.cn2en.keys(), ...this.maps.zh.keys()].filter(k => k.length <= 4));
     let i = 0;
     const N = text.length;
     while (i < N) {
@@ -455,10 +457,11 @@ class DictionaryService {
       const maxLen = Math.min(4, N - i);
       for (let L = maxLen; L >= 1; L--) {
         const word = text.slice(i, i + L);
-        if (keyset.has(word)) { hit = { word, dict: 'cn2en' }; break; }
+        if (keyset.has(word)) { hit = { word, dict: this.maps.cn2en.has(word) ? 'cn2en' : 'zh' }; break; }
       }
       if (hit) {
-        segs.push({ txt: hit.word, gloss: this.maps.cn2en.get(hit.word), dict: hit.dict });
+        const gloss = this.maps[hit.dict].get(hit.word);
+        segs.push({ txt: hit.word, gloss, dict: hit.dict });
         i += hit.word.length;
       } else {
         const ch = text[i];
@@ -541,14 +544,31 @@ class DictionaryService {
       }
       if (best) res.idiom = best;
     }
-    // 词语最大匹配
-    const keyset = new Set([...this.maps.cn2en.keys()].filter(k => k.length <= 4));
+    // 词语最大匹配：cn2en + 中文释义(zh) 词表合并分词
+    // 释义优先级：中文释义(zh) → 逐字中文释义(chars 拆分) → 英译兜底
+    const keyset = new Set([...this.maps.cn2en.keys(), ...this.maps.zh.keys()].filter(k => k.length <= 4));
     let i = 0;
     while (i < text.length) {
       let hit = null;
       for (let L = Math.min(4, text.length - i); L >= 1; L--) {
         const w = text.slice(i, i + L);
-        if (keyset.has(w)) { hit = { word: w, gloss: this.maps.cn2en.get(w) }; break; }
+        if (keyset.has(w)) {
+          const zhg = this.maps.zh.get(w);
+          if (zhg) { hit = { word: w, gloss: zhg, src: 'zh' }; break; }
+          // 逐字中文释义兜底：取 chars 词典释义的中文部分
+          const parts = [];
+          for (const ch of w) {
+            const cg = this.maps.chars.get(ch);
+            if (cg) {
+              const cn = cg.split(';').pop().trim();
+              if (cn && cn !== ch) parts.push(ch + ':' + cn);
+            }
+          }
+          hit = parts.length
+            ? { word: w, gloss: parts.join('；'), src: 'chars' }
+            : { word: w, gloss: this.maps.cn2en.get(w), src: 'cn2en' };
+          break;
+        }
       }
       if (hit) { res.words.push(hit); i += hit.word.length; }
       else { res.chars.push(text[i]); i += 1; }

@@ -238,7 +238,6 @@ class Reader {
       percent: $('#rt-percent'),
       content: $('#page-content'),
       ttsPlay: $('#tts-play'),
-      ttsStop: $('#tts-stop'),
       btnPrev: $('#btn-page-prev'),
       btnNext: $('#btn-page-next'),
       chapPrev: $('#btn-chap-prev'),
@@ -507,7 +506,7 @@ class Reader {
   }
 
   /* ---------- 划词 ---------- */
-  /** 由 App 注入: (text, type /* 'translate'|'explain'|'speak'|'copy' *\/) => void */
+  /** 由 App 注入: (text, type /* 'translate'|'speak'|'copy' *\/) => void */
   onSelectionAction = null;
 
   /* ---------- TTS 朗读 ---------- */
@@ -527,7 +526,6 @@ class Reader {
   }
   _syncTtsUI() {
     this.el.ttsPlay.textContent = this.reading ? '⏹' : '▶';
-    this.el.ttsStop.disabled = !this.reading;
     this.bus.emit('tts:state', { reading: this.reading });
   }
 
@@ -588,8 +586,8 @@ class Reader {
     this.el.chapPrev.onclick = () => this.prevChapter();
     this.el.chapNext.onclick = () => this.nextChapter();
     this.el.toc.onclick = () => this.bus.emit('reader:toc-open');
+    // 播放按钮即开关：未在朗读 → 开始；朗读中 → 停止（按钮图标 ⏹ 提示当前状态）
     this.el.ttsPlay.onclick = () => { this.reading ? this.stopReading() : this.startReading(); };
-    this.el.ttsStop.onclick = () => this.stopReading();
     // 全局键盘翻页（输入框/弹窗打开时不劫持按键）
     window.addEventListener('keydown', e => this._onKey(e));
 
@@ -610,7 +608,7 @@ class Reader {
       }
     }, { passive: true });
 
-    // 划词弹层（移动端：抑制系统菜单，自绘 翻译 / 解释 / 朗读 / 复制 工具栏）
+    // 划词弹层（移动端：抑制系统菜单，自绘 翻译 / 朗读 / 复制 工具栏）
     this._popupAt = 0;
     this.el.content.addEventListener('mouseup', e => this._maybeShowSelection(e));
     this.el.content.addEventListener('touchend', e => setTimeout(() => this._maybeShowSelection(e), 120), { passive: true });
@@ -667,7 +665,6 @@ class Reader {
         popup.appendChild(b);
       };
       mk(I18N.t('selTranslate'), 'translate');
-      mk(I18N.t('selExplain'), 'explain');
       mk(I18N.t('selSpeak'), 'speak');
       const sep = document.createElement('span'); sep.className = 'sp-sep'; popup.appendChild(sep);
       mk(I18N.t('selCopy'), 'copy');

@@ -49,7 +49,7 @@ for (const mm of script.matchAll(/I18N\.t\('([^']+)'/g)) {
 }
 for (const mm of script.matchAll(/I18N\.t\("([^"]+)"/g)) used.add(mm[1]);
 // 动态键 d_/d_hint_ + dict id（en2cn/cn2en/idioms/chars）展开为具体键
-const DICT_IDS = ['en2cn', 'cn2en', 'idioms', 'chars'];
+const DICT_IDS = ['en2cn', 'cn2en', 'zh', 'idioms', 'chars'];
 for (const pre of ['d_', 'd_hint_']) {
   if (used.has(pre)) { used.delete(pre); DICT_IDS.forEach(id => used.add(pre + id)); }
 }
