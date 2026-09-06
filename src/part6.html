@@ -483,6 +483,9 @@ class Reader {
     this.el.pageLabel.textContent = `${this.pageIndex + 1} / ${pages.length || 1}`;
     const p = this._currentBookPercent();
     this.el.percent.textContent = Math.round(p * 100) + '%';
+    // 手机端专属百分比（位于「上一章«」左侧）与桌面 #rt-percent 同步
+    const pm = document.getElementById('rt-percent-m');
+    if (pm) pm.textContent = Math.round(p * 100) + '%';
     this.bus.emit('reader:page', {
       bookId: this.book.id,
       chapterIndex: this.chapterIndex,
