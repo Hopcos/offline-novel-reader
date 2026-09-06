@@ -16265,6 +16265,17 @@ class App {
     this._renderDict();
   }
 
+  /** 「更多功能」面板的低频动作（对应按钮 data-action） */
+  _moreAction(action) {
+    if (action === 'help') { $('#dlg-help').style.display = 'flex'; }
+    else if (action === 'phonetic') { this._togglePhonetic(); }
+    else if (action === 'export') { this.exportBackup(); }
+    else if (action === 'import-backup') { $('#backup-input').click(); }
+    else if (action === 'paste') { $('#dlg-paste').style.display = 'flex'; }
+    else if (action === 'import') { $('#file-input').click(); }
+    else if (action === 'lang') { this._switchLang(); }
+  }
+
   /** 音标+词性过滤：隐藏时去掉 en2cn 词条开头的 /音标/词性. 前缀 */
   _fmtGloss(gloss) {
     if (this.settings.showPhonetic) return gloss;
@@ -16541,12 +16552,14 @@ class App {
 
   /* ---------- UI 事件绑定 ---------- */
   _bindUI() {
-    $('#toggle-sidebar').onclick = () => $('#sidebar').classList.toggle('open');
+    // 书库图标 = 原 ☰ 的开关书库功能；菜单按钮已移除
+    $('#tb-logo').onclick = () => $('#sidebar').classList.toggle('open');
     // 音标+词性显示开关（Aa）：隐藏时过滤 en2cn 词条中的 /音标/词性. 前缀
     $('#btn-phonetic').onclick = () => this._togglePhonetic();
     $('#btn-import').onclick = () => $('#file-input').click();
-    // 粘贴导入弹窗：统一绑定打开 + 关闭（取消 / 右上角 ✕）
-    bindModal($('#dlg-paste'), $('#btn-paste'));
+    // 粘贴导入 / 帮助弹窗：打开入口已移到「更多功能」面板（data-action），此处仅绑定关闭与点遮罩关闭
+    bindModal($('#dlg-paste'));
+    bindModal($('#dlg-help'));
     $('#paste-ok').onclick = async () => {
       const title = $('#paste-title').value.trim();
       const text = $('#paste-text').value;
@@ -16558,8 +16571,7 @@ class App {
       await this.refreshBooks();
       if (book) await this.openBook(book.id);
     };
-    $('#btn-export').onclick = () => this.exportBackup();
-    $('#btn-import-backup').onclick = () => $('#backup-input').click();
+    // 导出备份 / 导入备份：入口已移到「更多功能」面板（data-action）
     $('#backup-input').onchange = (e) => {
       const f = e.target.files && e.target.files[0];
       if (f) this.importBackupFile(f);
@@ -16573,9 +16585,6 @@ class App {
       this._searchTerm = e.target.value;
       this._renderBookList();
     }, 180);
-
-    // 语言切换
-    $('#btn-lang').onclick = () => this._switchLang();
 
     // 设置对话框
     bindModal($('#dlg-settings'), $('#btn-settings'));
@@ -16598,8 +16607,7 @@ class App {
       this.reader.tts.setVoice(e.target.value);
     };
 
-    // 帮助
-    bindModal($('#dlg-help'), $('#btn-help'));
+    // 帮助：入口已移到「更多功能」面板（data-action="help"）
     // 目录弹窗
     $('#dlg-chapters').querySelectorAll('[data-close]').forEach(b => {
       b.onclick = () => $('#dlg-chapters').style.display = 'none';
@@ -16616,15 +16624,24 @@ class App {
       try { this.reader._persistPosition(); } catch (e) { /* noop */ }
     });
 
-    // ---------- 移动端「更多」浮层 ----------
+    // ---------- 「更多」浮层 ----------
     $('#btn-more').onclick = (e) => { e.stopPropagation(); $('#more-overlay').classList.add('show'); };
     $('#more-close').onclick = () => $('#more-overlay').classList.remove('show');
+    // 阅读类按钮：转发到工具栏/阅读器对应控件
     $('#more-overlay').querySelectorAll('[data-for]').forEach(b => {
       b.onclick = (ev) => {
         ev.stopPropagation();
         $('#more-overlay').classList.remove('show');
         const t = document.querySelector(b.dataset.for);
         if (t && typeof t.click === 'function') t.click();
+      };
+    });
+    // 低频功能按钮：顶栏按钮已移除，直接执行动作
+    $('#more-overlay').querySelectorAll('[data-action]').forEach(b => {
+      b.onclick = (ev) => {
+        ev.stopPropagation();
+        $('#more-overlay').classList.remove('show');
+        this._moreAction(b.dataset.action);
       };
     });
     $('#more-rate').onchange = e => {
@@ -16640,7 +16657,7 @@ class App {
     // ---------- 点击面板以外任意位置自动关闭（侧栏 / 词典面板 / 更多浮层） ----------
     document.addEventListener('pointerdown', e => {
       const sb = $('#sidebar');
-      if (sb.classList.contains('open') && !sb.contains(e.target) && e.target.id !== 'toggle-sidebar') {
+      if (sb.classList.contains('open') && !sb.contains(e.target) && !e.target.closest('.tb-logo')) {
         sb.classList.remove('open');
       }
       const dp = $('#dict-panel');
@@ -16661,6 +16678,8 @@ class App {
     if (!head) return;
     let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
     head.addEventListener('pointerdown', e => {
+      // 关闭按钮（右上角 ✕ 等）不进入拖动：pointer capture 会吞掉它的 click，导致关闭不灵敏
+      if (e.target.closest('[data-close]')) return;
       if (e.button !== undefined && e.button !== 0) return;
       dragging = true;
       const r = modal.getBoundingClientRect();

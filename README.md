@@ -21,7 +21,7 @@ No server, no network, no build step needed to use it — just open the file.
 | 🚚 Migration | **Export backup** → one `.json` (all books + chapters + positions + settings) → **Import backup** on another device (merge or overwrite) |
 | 📖 Reading | Measured pagination (`canvas`-based line breaking), page/chapter nav, TOC drawer, jump-by-percent, keyboard & swipe & tap-zone controls, themes (light/sepia/dark/green), font size / line-height / font family / page width settings |
 | 🔍 Selection | Select any text → popup bar: **Translate / Explain / Speak / Copy**; optional auto-translate on selection |
-| 🌐 Language | Built-in **中文 / English** UI switch (top-bar 🌐 button); follows your browser language the first time, then persists your choice |
+| 🌐 Language | Built-in **中文 / English** UI switch (via the **⋯ More** panel in the reading toolbar); follows your browser language the first time, then persists your choice |
 | 📚 Offline dictionaries | Bundled into the HTML (5,000 EN→CN + 7,600 CN→EN + 670 Chinese definitions + 188 idioms + 318 character meanings): tabs per dictionary, custom entries you can add/remove |
 | 🔊 TTS | Browser-native speech synthesis; continuous page-to-page reading with paragraph highlighting, rate & voice selection, speak-selected-text |
 | ⚙️ Extensibility | Modular layered architecture, clear design patterns, Web Worker multithreading, documented data model (see below) |
@@ -58,9 +58,9 @@ All books, chapters, reading positions, settings and custom dictionary entries a
 
 ## 🔎 Reading
 
-- **Language**: the top-bar **🌐** button toggles the whole UI between **中文 and English** (titles, buttons, dialogs, dictionary panel, toasts…). On first launch the language follows your browser; afterwards your choice is saved in the settings and travels with the backup.
+- **Language**: the **⋯ More** panel in the reading toolbar has a **Language** entry that toggles the whole UI between **中文 and English** (titles, buttons, dialogs, dictionary panel, toasts…). On first launch the language follows your browser; afterwards your choice is saved in the settings and travels with the backup.
 - **Navigation**: `←` / `→` or `PageUp` / `PageDown` turn pages; `Home` / `End` jump to chapter start/end; on touch devices swipe left/right; the optional **tap zones** on the page edges flip pages; the **☷** button opens the table of contents; the chapter `«` `»` buttons move chapter by chapter.
-- **Settings** (⚙): theme, font size, line height, font family (serif / kai / sans), page width, TTS rate, tap zones, paragraph indent, selection behavior.
+- **Settings / More** (⚙ / ⋯): theme, font size, line height, font family (serif / kai / sans), page width, TTS rate, tap zones, paragraph indent, selection behavior; low-frequency actions (**Export backup, Import backup, Paste import, Help, Language…**) live in the **⋯ More** panel.
 - **Percent** shown at the toolbar right is the whole-book progress; reopening a book always resumes exactly where you left off.
 
 ## 🈶 Selection → Translation

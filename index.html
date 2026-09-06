@@ -63,18 +63,17 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 /* ---------- 应用布局 ---------- */
 #app{
   display:grid; height:100vh;
-  grid-template-areas:"topbar topbar" "main main" "statusbar statusbar";
+  grid-template-areas:"main main" "statusbar statusbar";
   grid-template-columns:1fr;
-  grid-template-rows:52px 1fr 30px;
+  grid-template-rows:1fr 30px;
 }
-#topbar{grid-area:topbar; display:flex; align-items:center; gap:8px; padding:0 14px;
-  background:var(--bg2); border-bottom:1px solid var(--line); z-index:50;
-  box-shadow:0 2px 8px rgba(0,0,0,.06)}
-/* 顶栏品牌图标：打开的书（小说）· 霓虹渐变描边 + 辉光呼吸（未来风） */
+/* 顶栏品牌图标：打开的书（小说）· 霓虹渐变描边 + 辉光呼吸（未来风）
+   已并入阅读工具栏最左侧，同时是「打开/收起书库」入口（原 ☰ 按钮的功能） */
 .tb-logo{
   width:24px; height:24px; flex:none; display:block; padding-right:2px;
+  cursor:pointer;
   filter:drop-shadow(0 0 4px rgba(0,229,255,.5)) drop-shadow(0 0 10px rgba(124,77,255,.32));
-  user-select:none; -webkit-user-select:none; pointer-events:none;
+  user-select:none; -webkit-user-select:none;
   animation:logoGlow 3.4s ease-in-out infinite;
 }
 @keyframes logoGlow{
@@ -88,7 +87,6 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 #main{grid-area:main; position:relative; overflow:hidden; display:flex; flex-direction:column}
 
 /* ---------- 顶栏 ---------- */
-.tb-spacer{flex:1}
 .btn{
   display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:8px;
   background:var(--btn-bg); color:var(--btn-fg); font-size:13px; border:1px solid transparent;
@@ -105,7 +103,7 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 
 /* ---------- 侧栏 书库（所有视口统一为抽屉：默认收起，☰ 展开） ---------- */
 #sidebar{
-  position:fixed; left:0; top:52px; bottom:30px; width:min(300px,86vw); z-index:35;
+  position:fixed; left:0; top:0; bottom:30px; width:min(300px,86vw); z-index:35;
   background:var(--bg2); border-right:1px solid var(--line);
   display:flex; flex-direction:column; overflow:hidden;
   transform:translateX(-105%); transition:transform .22s ease;
@@ -211,8 +209,8 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 #sel-popup .sp-btn:hover{background:rgba(255,255,255,.15)}
 #sel-popup .sp-sep{width:1px; height:14px; background:rgba(255,255,255,.25)}
 
-/* 移动端「更多」浮层 */
-#btn-more{display:none}
+/* 「更多功能」触发按钮：任何宽度、任何状态下都常显（它是低频功能的唯一下级入口，永不隐藏） */
+#btn-more{display:inline-flex}
 #more-overlay{
   position:fixed; inset:0; background:var(--overlay); z-index:88;
   display:none; align-items:flex-end; justify-content:center;
@@ -240,7 +238,7 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 
 /* ---------- 词典面板 ---------- */
 #dict-panel{
-  position:fixed; top:52px; right:0; bottom:30px; width:min(400px,94vw); z-index:40;
+  position:fixed; top:0; right:0; bottom:30px; width:min(400px,94vw); z-index:40;
   background:var(--bg2); border-left:1px solid var(--line);
   display:flex; flex-direction:column; transform:translateX(102%);
   transition:transform .22s ease; box-shadow:-8px 0 24px rgba(0,0,0,.12);
@@ -351,17 +349,13 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 }
 /* ---------- 手机端 ---------- */
 @media (max-width:620px){
-  /* 阅读工具栏：核心图标常显（目录 / 上一章 / 下一章 / 播放），次要项收纳进「⋯」浮层 */
-  #btn-more{display:inline-flex}
+  /* 阅读工具栏：核心图标常显（书库 / 导入 / 目录 / 上一章 / 下一章 / 播放…），次要项收纳进「⋯」浮层。
+     放不下时按优先级移除：先 ⚙ 阅读设置（「⋯」面板内有「设置」入口可打开设置弹窗），
+     「⋯」更多功能入口永远保留——它是导出/导入备份、粘贴、帮助、语言等低频功能的唯一下级入口 */
   .rtoolbar{gap:4px; padding:6px 8px}
   .rt-title{min-width:40px; font-size:13px}
   .rt-gap, #tts-rate, #tts-voice,
-  .rt-page-label, #btn-page-prev, #btn-page-next, .rt-percent{display:none}
-  /* 顶栏：导入按钮压缩为图标，隐藏文字按钮 */
-  #topbar{gap:4px; padding:0 8px}
-  #btn-import, #btn-export, #btn-import-backup{font-size:0}
-  #btn-import::before, #btn-export::before, #btn-import-backup::before{font-size:15px}
-  #btn-import::before{content:'⬆'} #btn-export::before{content:'⇩'} #btn-import-backup::before{content:'⇧'}
+  .rt-page-label, #btn-page-prev, #btn-page-next, .rt-percent, #btn-settings{display:none}
   /* 设置表单单列 */
   .form-grid{grid-template-columns:1fr}
   /* 状态栏收窄 */
@@ -375,6 +369,12 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   #sel-popup{transform:translate(-50%,-140%); padding:4px 5px;}
   #page-content{padding-top:16px; padding-bottom:20px}
 }
+/* ---------- 极小屏（≤400px）：章节翻章（«»）永远显示在章节名右侧（内容可收缩，不浪费空间），仅撤下音标开关 */
+@media (max-width:400px){
+  .rt-title{min-width:0; font-size:12px}
+  /* 音标开关（Aa）撤下——「⋯」面板内有「音标」可操作 */
+  #btn-phonetic{display:none}
+}
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important; animation:none!important}
 }
@@ -385,30 +385,6 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 <div id="app">
 
   <!-- ===== 顶栏 ===== -->
-  <header id="topbar">
-    <svg class="tb-logo" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="tbLogoGrad" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#00e5ff"/>
-          <stop offset="55%" stop-color="#7c4dff"/>
-          <stop offset="100%" stop-color="#ff4dd2"/>
-        </linearGradient>
-      </defs>
-      <!-- 打开的书（小说）：两页展开，霓虹渐变描边 + 辉光 -->
-      <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" fill="none" stroke="url(#tbLogoGrad)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" fill="none" stroke="url(#tbLogoGrad)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    <button class="btn ghost icon" id="toggle-sidebar" data-i18n-title="tocTitle">☰</button>
-    <div class="tb-spacer"></div>
-    <button class="btn ghost" id="btn-import" data-i18n-title="impTitle" data-i18n="btnImport">⬆ 导入小说</button>
-    <button class="btn ghost icon" id="btn-paste" data-i18n-title="pasteTitle">📋</button>
-    <button class="btn ghost bt-hide-sm" id="btn-export" data-i18n-title="exportTitle" data-i18n="btnExport">⇩ 导出备份</button>
-    <button class="btn ghost bt-hide-sm" id="btn-import-backup" data-i18n-title="impBackTitle" data-i18n="btnImpBack">⇧ 导入备份</button>
-    <button class="btn ghost icon" id="btn-lang" data-i18n-title="langSwitch">🌐 EN</button>
-    <button class="btn ghost icon" id="btn-settings" data-i18n-title="settingsTitle">⚙</button>
-    <button class="btn ghost icon" id="btn-help" data-i18n-title="helpTitle">?</button>
-  </header>
-
   <!-- ===== 侧栏 · 书库 ===== -->
   <aside id="sidebar">
     <div class="side-search"><input id="book-search" type="search" data-i18n-ph="searchPh" placeholder="搜索书名 / 作者…" autocomplete="off"></div>
@@ -433,6 +409,20 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 
     <div id="reader">
       <div class="rtoolbar">
+        <!-- 书库图标（最左侧）：点击展开/收起小说集；其后为导入图标（仅图标） -->
+        <svg id="tb-logo" class="tb-logo" viewBox="0 0 24 24" fill="none" role="button" data-i18n-title="tocTitle">
+          <defs>
+            <linearGradient id="tbLogoGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#00e5ff"/>
+              <stop offset="55%" stop-color="#7c4dff"/>
+              <stop offset="100%" stop-color="#ff4dd2"/>
+            </linearGradient>
+          </defs>
+          <!-- 打开的书（小说）：两页展开，霓虹渐变描边 + 辉光 -->
+          <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" fill="none" stroke="url(#tbLogoGrad)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" fill="none" stroke="url(#tbLogoGrad)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <button class="btn ghost icon" id="btn-import" data-i18n-title="impTitle">⬆</button>
         <button class="btn ghost icon rt-toc" id="btn-toc" data-i18n-title="tocTitle">☷</button>
         <span class="rt-title" id="rt-title">—</span>
         <button class="btn ghost icon rt-chapnav" id="btn-chap-prev" data-i18n-title="chapPrevTitle">«</button>
@@ -448,6 +438,7 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
         <span class="rt-percent" id="rt-percent" data-i18n-title="percentTitle">0%</span>
         <button class="btn ghost icon rt-ph" id="btn-phonetic" data-i18n-title="phTitle">Aa</button>
         <button class="btn ghost icon" id="btn-more" data-i18n-title="moreTitle">⋯</button>
+        <button class="btn ghost icon" id="btn-settings" data-i18n-title="settingsTitle">⚙</button>
       </div>
       <div id="page-frame">
         <div id="page-content" tabindex="0"></div>
@@ -494,12 +485,13 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
       <button data-for="#btn-page-prev" data-i18n="pagePrevTitle">上一页</button>
       <button data-for="#btn-page-next" data-i18n="pageNextTitle">下一页</button>
       <button data-for="#btn-settings" data-i18n="settingsTitle">设置</button>
-      <button data-for="#btn-help" data-i18n="helpTitle">帮助</button>
-      <button data-for="#btn-export" data-i18n="btnExport">导出备份</button>
-      <button data-for="#btn-import-backup" data-i18n="btnImpBack">导入备份</button>
-      <button data-for="#btn-paste" data-i18n="pasteTitle">粘贴导入</button>
-      <button data-for="#btn-import" data-i18n="btnImport">导入小说</button>
-      <button data-for="#btn-lang" data-i18n="langSwitch">语言</button>
+      <button data-action="phonetic" data-i18n="phTitle">音标</button>
+      <button data-action="help" data-i18n="helpTitle">帮助</button>
+      <button data-action="export" data-i18n="btnExport">导出备份</button>
+      <button data-action="import-backup" data-i18n="btnImpBack">导入备份</button>
+      <button data-action="paste" data-i18n="pasteTitle">粘贴导入</button>
+      <button data-action="import" data-i18n="btnImport">导入小说</button>
+      <button data-action="lang" data-i18n="langSwitch">语言</button>
     </div>
     <div class="more-row"><label data-i18n="ttsRateTitle">朗读语速</label><select id="more-rate" class="mini"></select></div>
     <div class="more-row"><label data-i18n="ttsVoiceTitle">发音人</label><select id="more-voice" class="mini"></select></div>
@@ -16850,6 +16842,17 @@ class App {
     this._renderDict();
   }
 
+  /** 「更多功能」面板的低频动作（对应按钮 data-action） */
+  _moreAction(action) {
+    if (action === 'help') { $('#dlg-help').style.display = 'flex'; }
+    else if (action === 'phonetic') { this._togglePhonetic(); }
+    else if (action === 'export') { this.exportBackup(); }
+    else if (action === 'import-backup') { $('#backup-input').click(); }
+    else if (action === 'paste') { $('#dlg-paste').style.display = 'flex'; }
+    else if (action === 'import') { $('#file-input').click(); }
+    else if (action === 'lang') { this._switchLang(); }
+  }
+
   /** 音标+词性过滤：隐藏时去掉 en2cn 词条开头的 /音标/词性. 前缀 */
   _fmtGloss(gloss) {
     if (this.settings.showPhonetic) return gloss;
@@ -17126,12 +17129,14 @@ class App {
 
   /* ---------- UI 事件绑定 ---------- */
   _bindUI() {
-    $('#toggle-sidebar').onclick = () => $('#sidebar').classList.toggle('open');
+    // 书库图标 = 原 ☰ 的开关书库功能；菜单按钮已移除
+    $('#tb-logo').onclick = () => $('#sidebar').classList.toggle('open');
     // 音标+词性显示开关（Aa）：隐藏时过滤 en2cn 词条中的 /音标/词性. 前缀
     $('#btn-phonetic').onclick = () => this._togglePhonetic();
     $('#btn-import').onclick = () => $('#file-input').click();
-    // 粘贴导入弹窗：统一绑定打开 + 关闭（取消 / 右上角 ✕）
-    bindModal($('#dlg-paste'), $('#btn-paste'));
+    // 粘贴导入 / 帮助弹窗：打开入口已移到「更多功能」面板（data-action），此处仅绑定关闭与点遮罩关闭
+    bindModal($('#dlg-paste'));
+    bindModal($('#dlg-help'));
     $('#paste-ok').onclick = async () => {
       const title = $('#paste-title').value.trim();
       const text = $('#paste-text').value;
@@ -17143,8 +17148,7 @@ class App {
       await this.refreshBooks();
       if (book) await this.openBook(book.id);
     };
-    $('#btn-export').onclick = () => this.exportBackup();
-    $('#btn-import-backup').onclick = () => $('#backup-input').click();
+    // 导出备份 / 导入备份：入口已移到「更多功能」面板（data-action）
     $('#backup-input').onchange = (e) => {
       const f = e.target.files && e.target.files[0];
       if (f) this.importBackupFile(f);
@@ -17158,9 +17162,6 @@ class App {
       this._searchTerm = e.target.value;
       this._renderBookList();
     }, 180);
-
-    // 语言切换
-    $('#btn-lang').onclick = () => this._switchLang();
 
     // 设置对话框
     bindModal($('#dlg-settings'), $('#btn-settings'));
@@ -17183,8 +17184,7 @@ class App {
       this.reader.tts.setVoice(e.target.value);
     };
 
-    // 帮助
-    bindModal($('#dlg-help'), $('#btn-help'));
+    // 帮助：入口已移到「更多功能」面板（data-action="help"）
     // 目录弹窗
     $('#dlg-chapters').querySelectorAll('[data-close]').forEach(b => {
       b.onclick = () => $('#dlg-chapters').style.display = 'none';
@@ -17201,15 +17201,24 @@ class App {
       try { this.reader._persistPosition(); } catch (e) { /* noop */ }
     });
 
-    // ---------- 移动端「更多」浮层 ----------
+    // ---------- 「更多」浮层 ----------
     $('#btn-more').onclick = (e) => { e.stopPropagation(); $('#more-overlay').classList.add('show'); };
     $('#more-close').onclick = () => $('#more-overlay').classList.remove('show');
+    // 阅读类按钮：转发到工具栏/阅读器对应控件
     $('#more-overlay').querySelectorAll('[data-for]').forEach(b => {
       b.onclick = (ev) => {
         ev.stopPropagation();
         $('#more-overlay').classList.remove('show');
         const t = document.querySelector(b.dataset.for);
         if (t && typeof t.click === 'function') t.click();
+      };
+    });
+    // 低频功能按钮：顶栏按钮已移除，直接执行动作
+    $('#more-overlay').querySelectorAll('[data-action]').forEach(b => {
+      b.onclick = (ev) => {
+        ev.stopPropagation();
+        $('#more-overlay').classList.remove('show');
+        this._moreAction(b.dataset.action);
       };
     });
     $('#more-rate').onchange = e => {
@@ -17225,7 +17234,7 @@ class App {
     // ---------- 点击面板以外任意位置自动关闭（侧栏 / 词典面板 / 更多浮层） ----------
     document.addEventListener('pointerdown', e => {
       const sb = $('#sidebar');
-      if (sb.classList.contains('open') && !sb.contains(e.target) && e.target.id !== 'toggle-sidebar') {
+      if (sb.classList.contains('open') && !sb.contains(e.target) && !e.target.closest('.tb-logo')) {
         sb.classList.remove('open');
       }
       const dp = $('#dict-panel');
@@ -17246,6 +17255,8 @@ class App {
     if (!head) return;
     let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
     head.addEventListener('pointerdown', e => {
+      // 关闭按钮（右上角 ✕ 等）不进入拖动：pointer capture 会吞掉它的 click，导致关闭不灵敏
+      if (e.target.closest('[data-close]')) return;
       if (e.button !== undefined && e.button !== 0) return;
       dragging = true;
       const r = modal.getBoundingClientRect();
