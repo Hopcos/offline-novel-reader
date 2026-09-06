@@ -67,7 +67,8 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
   grid-template-columns:1fr;
   grid-template-rows:1fr 30px;
 }
-/* 顶栏品牌图标：打开的书（小说）· 霓虹渐变描边 + 辉光呼吸（未来风）
+/* 顶栏品牌图标：人坐凳上捧书阅读的「四面轮播」小动画——
+   前 → 右 → 后 → 左 每视角约 1 秒，柔和淡切，像绕着读者转一圈；
    已并入阅读工具栏最左侧，同时是「打开/收起书库」入口（原 ☰ 按钮的功能） */
 .tb-logo{
   width:24px; height:24px; flex:none; display:block; padding-right:2px;
@@ -80,7 +81,21 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
   0%,100%{filter:drop-shadow(0 0 4px rgba(0,229,255,.42)) drop-shadow(0 0 10px rgba(124,77,255,.26))}
   50%{filter:drop-shadow(0 0 9px rgba(0,229,255,.8)) drop-shadow(0 0 18px rgba(124,77,255,.5))}
 }
-@media (prefers-reduced-motion:reduce){.tb-logo{animation:none}}
+/* 四面轮播：四个 <g class="face"> 各占 4s 周期的 1/4，相位错开形成环绕感 */
+.tb-logo .face{opacity:0; animation:tbOrbit 4s linear infinite}
+.tb-logo .f-front{animation-delay:0s}
+.tb-logo .f-right{animation-delay:1s}
+.tb-logo .f-back{animation-delay:2s}
+.tb-logo .f-left{animation-delay:3s}
+@keyframes tbOrbit{
+  0%,20%{opacity:1}
+  26%,100%{opacity:0}
+}
+@media (prefers-reduced-motion:reduce){
+  .tb-logo{animation:none}
+  .tb-logo .face{animation:none; opacity:0}
+  .tb-logo .f-front{opacity:1}
+}
 #statusbar{grid-area:statusbar; display:flex; align-items:center; gap:16px; padding:0 14px;
   font-size:12px; color:var(--muted); background:var(--bg2); border-top:1px solid var(--line);
   overflow:hidden; white-space:nowrap}

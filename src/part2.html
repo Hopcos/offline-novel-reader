@@ -27,7 +27,8 @@
     <div id="reader">
       <div class="rtoolbar">
         <!-- 书库图标（最左侧）：点击展开/收起小说集；导入入口在侧栏内（搜索框上方），工具栏不再重复放置导入图标 -->
-        <svg id="tb-logo" class="tb-logo" viewBox="0 0 24 24" fill="none" role="button" data-i18n-title="tocTitle">
+        <!-- 读者图标：人坐在凳子上捧书阅读，前→右→后→左 四个视角轮播（环绕读者） -->
+        <svg id="tb-logo" class="tb-logo" viewBox="0 0 48 48" fill="none" role="button" data-i18n-title="tocTitle">
           <defs>
             <linearGradient id="tbLogoGrad" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0%" stop-color="#00e5ff"/>
@@ -35,9 +36,57 @@
               <stop offset="100%" stop-color="#ff4dd2"/>
             </linearGradient>
           </defs>
-          <!-- 打开的书（小说）：两页展开，霓虹渐变描边 + 辉光 -->
-          <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" fill="none" stroke="url(#tbLogoGrad)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" fill="none" stroke="url(#tbLogoGrad)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- ① 正面：面向读者，低头看书，书面（封底）朝外 -->
+          <g class="face f-front" stroke="url(#tbLogoGrad)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="24" cy="13" r="5"/>
+            <circle cx="22.1" cy="14.3" r=".75" fill="url(#tbLogoGrad)" stroke="none"/>
+            <circle cx="25.9" cy="14.3" r=".75" fill="url(#tbLogoGrad)" stroke="none"/>
+            <path d="M24 18 C19 18.5 17.6 21.5 17.4 25 L17.4 31 L30.6 31 L30.6 25 C30.4 21.5 29 18.5 24 18 Z"/>
+            <path d="M17.8 20.5 L14.6 25 L17.2 28.5"/>
+            <path d="M30.2 20.5 L33.4 25 L30.8 28.5"/>
+            <rect x="18" y="23.5" width="12" height="7" rx="1.1"/>
+            <line x1="24" y1="24.4" x2="24" y2="29.6"/>
+            <ellipse cx="24" cy="34" rx="10" ry="2.4"/>
+            <path d="M16.8 35.7 L14.8 44 M31.2 35.7 L33.2 44 M24 36.4 L24 44"/>
+          </g>
+          <!-- ② 右侧面：朝右而坐，书向前倾举、屈膝 -->
+          <g class="face f-right" stroke="url(#tbLogoGrad)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="22" cy="13.5" r="5"/>
+            <path d="M26.7 13 L28.8 14.3 L26.6 15.2 Z" fill="url(#tbLogoGrad)" stroke="none"/>
+            <circle cx="18.1" cy="9.7" r="1.7" fill="url(#tbLogoGrad)" stroke="none"/>
+            <circle cx="24.5" cy="14.8" r=".75" fill="url(#tbLogoGrad)" stroke="none"/>
+            <path d="M21.6 18.4 C18.4 20.5 18 25 19.4 31 L26.8 31 C26.2 25.5 26 21 21.6 18.4 Z"/>
+            <path d="M21.8 20.5 L25 24.6 L29.7 22.9"/>
+            <path d="M27.5 19.5 L34 17.2 L35.8 22.8 L29.3 25.1 Z"/>
+            <line x1="30.3" y1="18.4" x2="32.1" y2="24"/>
+            <path d="M20.5 31.2 L30.6 30.8 L31.3 39.8 L34.8 40.6" stroke-width="2.3"/>
+            <rect x="13.3" y="31.4" width="12.5" height="2.3" rx="1.1"/>
+            <path d="M15.6 33.7 L14.4 44 M24.2 33.7 L25.4 44"/>
+          </g>
+          <!-- ③ 背面：背对读者，后脑勺，肘部与书角从两侧露出 -->
+          <g class="face f-back" stroke="url(#tbLogoGrad)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="24" cy="13" r="5" fill="url(#tbLogoGrad)" stroke="none" opacity=".92"/>
+            <path d="M24 18 C19 18.5 17.6 21.5 17.4 25 L17.4 31 L30.6 31 L30.6 25 C30.4 21.5 29 18.5 24 18 Z"/>
+            <path d="M17.8 20.5 L14.8 24.6 M30.2 20.5 L33.2 24.6"/>
+            <rect x="12.4" y="24" width="3" height="5.2" rx=".9"/>
+            <rect x="32.6" y="24" width="3" height="5.2" rx=".9"/>
+            <ellipse cx="24" cy="34" rx="10" ry="2.4"/>
+            <path d="M16.8 35.7 L14.8 44 M31.2 35.7 L33.2 44 M24 36.4 L24 44"/>
+          </g>
+          <!-- ④ 左侧面：右侧面镜像 -->
+          <g class="face f-left" transform="translate(48 0) scale(-1 1)" stroke="url(#tbLogoGrad)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="22" cy="13.5" r="5"/>
+            <path d="M26.7 13 L28.8 14.3 L26.6 15.2 Z" fill="url(#tbLogoGrad)" stroke="none"/>
+            <circle cx="18.1" cy="9.7" r="1.7" fill="url(#tbLogoGrad)" stroke="none"/>
+            <circle cx="24.5" cy="14.8" r=".75" fill="url(#tbLogoGrad)" stroke="none"/>
+            <path d="M21.6 18.4 C18.4 20.5 18 25 19.4 31 L26.8 31 C26.2 25.5 26 21 21.6 18.4 Z"/>
+            <path d="M21.8 20.5 L25 24.6 L29.7 22.9"/>
+            <path d="M27.5 19.5 L34 17.2 L35.8 22.8 L29.3 25.1 Z"/>
+            <line x1="30.3" y1="18.4" x2="32.1" y2="24"/>
+            <path d="M20.5 31.2 L30.6 30.8 L31.3 39.8 L34.8 40.6" stroke-width="2.3"/>
+            <rect x="13.3" y="31.4" width="12.5" height="2.3" rx="1.1"/>
+            <path d="M15.6 33.7 L14.4 44 M24.2 33.7 L25.4 44"/>
+          </g>
         </svg>
         <button class="btn ghost icon rt-toc" id="btn-toc" data-i18n-title="tocTitle">☷</button>
         <span class="rt-title" id="rt-title">—</span>
