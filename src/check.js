@@ -15715,7 +15715,11 @@ class Reader {
     const groups = [];
     for (const ln of page.lines) {
       const last = groups[groups.length - 1];
-      const text = chapter.paras[ln.p].slice(ln.s, ln.e);
+      // 朗读内容与正文显示一致：隐藏音标/词性时同样过滤 "/音标/ 词性. " 前缀
+      const raw = chapter.paras[ln.p].slice(ln.s, ln.e);
+      const text = (this.settings && this.settings.showPhonetic === false)
+        ? raw.replace(/\/[^/]*\/\s*[a-z]{1,6}\.\s+/gi, '')
+        : raw;
       if (last && last.p === ln.p) last.text += text;
       else groups.push({ p: ln.p, text });
     }

@@ -202,10 +202,14 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
 }
 #page-content .para{margin:0 0 .35em; text-indent:2em}
 /* 折衷保障：个别页面内容若仍超出可视区（浏览器真实断行与估算偏差），
-   允许在页内向下滚动看全最后一行；正常页不启用，外观与行为无变化 */
+   允许在页内向下滚动看全最后一行；正常页不启用，外观与行为无变化。
+   加大底部留白：让滚动行程更长、最后一行上方有充足空隙，即使溢出较多也能完整看到
+   （此规则位于基础 padding 之后、媒体查询之前，配合下方媒体查询覆盖保持 footroom 充足） */
 #page-content.can-scroll{
   overflow-y:auto; touch-action:pan-y; overscroll-behavior:contain;
   scrollbar-width:thin;
+  -webkit-overflow-scrolling:touch;
+  padding-bottom:calc(1.5em + 64px);
 }
 #page-content.no-indent .para{text-indent:0}
 #page-content .para.tight{margin-bottom:0}
