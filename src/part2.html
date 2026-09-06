@@ -157,6 +157,7 @@
     </div>
     <div class="more-row"><label data-i18n="ttsRateTitle">朗读语速</label><select id="more-rate" class="mini"></select></div>
     <div class="more-row"><label data-i18n="ttsVoiceTitle">发音人</label><select id="more-voice" class="mini"></select></div>
+    <div class="more-row"><label data-i18n="awakeTitle">常亮时长</label><select id="more-awake" class="mini"></select></div>
   </div>
 </div>
 
@@ -450,6 +451,14 @@ const I18N_LANGS = {
     speakingSel: '正在朗读选中文字…',
     bookFinished: '全书朗读完成',
     ttsResume: '已从上次停止处继续朗读',
+    awakeTitle: '常亮时长',
+    awakeNone: '默认',
+    awakeM5: '5 分钟',
+    awakeM30: '30 分钟',
+    awakeH1: '1 小时',
+    awakeH2: '2 小时',
+    awakeH5: '5 小时',
+    awakeNo: '当前浏览器不支持屏幕常亮，将在锁屏后熄屏',
     // 粘贴导入
     pasteTitleH: '粘贴导入小说',
     pasteName: '书名',
@@ -651,6 +660,14 @@ const I18N_LANGS = {
     speakingSel: 'Reading selected text…',
     bookFinished: 'Finished reading the book',
     ttsResume: 'Resumed from where you stopped',
+    awakeTitle: 'Wake screen',
+    awakeNone: 'Default',
+    awakeM5: '5 minutes',
+    awakeM30: '30 minutes',
+    awakeH1: '1 hour',
+    awakeH2: '2 hours',
+    awakeH5: '5 hours',
+    awakeNo: 'Screen wake lock is not supported here; the screen may sleep when locked',
     pasteTitleH: 'Paste-import a novel',
     pasteName: 'Title',
     pasteNamePh: 'required',

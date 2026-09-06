@@ -211,6 +211,14 @@ const I18N_LANGS = {
     speakingSel: '正在朗读选中文字…',
     bookFinished: '全书朗读完成',
     ttsResume: '已从上次停止处继续朗读',
+    awakeTitle: '常亮时长',
+    awakeNone: '默认',
+    awakeM5: '5 分钟',
+    awakeM30: '30 分钟',
+    awakeH1: '1 小时',
+    awakeH2: '2 小时',
+    awakeH5: '5 小时',
+    awakeNo: '当前浏览器不支持屏幕常亮，将在锁屏后熄屏',
     // 粘贴导入
     pasteTitleH: '粘贴导入小说',
     pasteName: '书名',
@@ -412,6 +420,14 @@ const I18N_LANGS = {
     speakingSel: 'Reading selected text…',
     bookFinished: 'Finished reading the book',
     ttsResume: 'Resumed from where you stopped',
+    awakeTitle: 'Wake screen',
+    awakeNone: 'Default',
+    awakeM5: '5 minutes',
+    awakeM30: '30 minutes',
+    awakeH1: '1 hour',
+    awakeH2: '2 hours',
+    awakeH5: '5 hours',
+    awakeNo: 'Screen wake lock is not supported here; the screen may sleep when locked',
     pasteTitleH: 'Paste-import a novel',
     pasteName: 'Title',
     pasteNamePh: 'required',
@@ -16024,7 +16040,28 @@ class App {
       showPhonetic: true,   // 英译中词条是否显示「音标+词性」前缀（Aa 开关）
       ttsRate: 1,
       ttsVoice: '',
+      awakeDur: 0,          // 屏幕常亮时长（分钟）：0=默认（跟随系统熄屏），5/30/60/120/300 分钟
     };
+  }
+
+  /* ---------- 屏幕常亮（Screen Wake Lock）---------- */
+  /** 应用常亮设置：duration 内保持屏幕点亮；非法/不支持时静默，页面回到可见时自动续期 */
+  _applyWakeLock() {
+    // 清理既有
+    if (this._wakeTimer) { clearTimeout(this._wakeTimer); this._wakeTimer = null; }
+    if (this._wakeSentinel) { const s = this._wakeSentinel; this._wakeSentinel = null; try { s.release(); } catch (e) { /* 已释放 */ } }
+    const dur = (this.settings && this.settings.awakeDur) || 0;
+    if (!dur) { this._wakeUntil = 0; return; }
+    if (!navigator.wakeLock || !navigator.wakeLock.request) { toast(I18N.t('awakeNo'), true); return; }
+    if (document.visibilityState !== 'visible') return;   // 后台时浏览器策略不允许；回前台由 visibilitychange 续期
+    const remain = this._wakeUntil ? Math.max(0, this._wakeUntil - Date.now()) : dur * 60000;
+    if (remain <= 0) { this._wakeUntil = 0; return; }      // 窗口已过期：保持默认熄屏
+    this._wakeUntil = Date.now() + remain;
+    navigator.wakeLock.request('screen').then(s => {
+      this._wakeSentinel = s;
+      if (s.addEventListener) s.addEventListener('release', () => { if (this._wakeSentinel === s) this._wakeSentinel = null; });
+    }).catch(() => { /* 请求失败（权限/系统限制）不影响阅读 */ });
+    this._wakeTimer = setTimeout(() => this._applyWakeLock(), remain);  // 到点按时长释放
   }
 
   async init() {
@@ -16072,6 +16109,7 @@ class App {
     $('#st-worker').textContent = I18N.t('stWorker', { m: I18N.t(this.data._worker.available ? 'workerReady' : 'workerMain') });
     $('#st-book').textContent = I18N.t('noBook');
     this._fillRateSelect('#tts-rate');
+    this._fillAwakeSelect();
     this._fillSettingSelects();
     this._voices = [];
     this.reader.tts.onVoices(voices => { this._voices = voices; this._fillVoiceSelect(voices); });
@@ -16325,6 +16363,7 @@ class App {
     this._renderDictTabs();            // 词典标签
     this._renderDict();                // 当前查询结果文案
     this._fillVoiceSelect(this._voices || []); // 默认发音人
+    this._fillAwakeSelect();            // 常亮时长（选项文案随语言重填）
     $('#st-book').textContent = this.reader.book ? this.reader.book.title : I18N.t('noBook');
     $('#st-tts').textContent = this.reader.reading ? I18N.t('stReading') : '';
     if ($('#dlg-chapters').style.display !== 'none') this._openToc();
@@ -16749,6 +16788,19 @@ class App {
       this.reader.tts.setVoice(e.target.value);
       const t = $('#tts-voice'); if (t) t.value = e.target.value;
     };
+    $('#more-awake').onchange = e => {
+      this.setSetting('awakeDur', parseInt(e.target.value, 10) || 0);
+      this._applyWakeLock();   // 立即生效：选择时长即请求常亮，回到「默认」即释放
+    };
+
+    // 常亮设置：启动时若已持久化非默认值则自动请求；页面进入后台会被系统强制释放，
+    // 回到可见时若仍在常亮窗口内自动续期（剩余时长）
+    this._applyWakeLock();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && (this.settings && this.settings.awakeDur > 0)) {
+        if (this._wakeUntil && Date.now() < this._wakeUntil && !this._wakeSentinel) this._applyWakeLock();
+      }
+    });
 
     // ---------- 点击面板以外任意位置自动关闭（侧栏 / 词典面板 / 更多浮层） ----------
     document.addEventListener('pointerdown', e => {
@@ -16879,6 +16931,20 @@ class App {
     const a = $('#tts-voice'), b = $('#more-voice');
     if (a) render(a);
     if (b) render(b);
+  }
+  /** 常亮时长下拉（更多面板，发音人下方）：默认 / 5 分钟 / 30 分钟 / 1 小时 / 2 小时 / 5 小时 */
+  _fillAwakeSelect() {
+    const sel = $('#more-awake');
+    if (!sel) return;
+    sel.innerHTML = '';
+    const opts = [['0', 'awakeNone'], ['5', 'awakeM5'], ['30', 'awakeM30'], ['60', 'awakeH1'], ['120', 'awakeH2'], ['300', 'awakeH5']];
+    for (const [v, key] of opts) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = I18N.t(key);
+      sel.appendChild(o);
+    }
+    sel.value = String(this.settings.awakeDur || 0);
   }
 }
 
