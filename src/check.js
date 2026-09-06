@@ -139,6 +139,8 @@ const I18N_LANGS = {
     settingsTitle: '阅读设置',
     helpTitle: '帮助',
     langSwitch: '切换界面语言（中 / EN）',
+    phMore: '隐藏/显示\n音标与词性',
+    langMore: '切换界面语言\n（中 / EN）',
     moreTitle: '更多功能',
     // 侧栏
     searchPh: '搜索书名 / 作者…',
@@ -342,6 +344,8 @@ const I18N_LANGS = {
     settingsTitle: 'Reader settings',
     helpTitle: 'Help',
     langSwitch: 'Switch UI language (English / 中文)',
+    phMore: 'Show/hide\nphonetic & POS',
+    langMore: 'Switch UI language\n(English / 中文)',
     moreTitle: 'More',
     searchPh: 'Search title / author…',
     dbInit: 'Database…',

@@ -146,11 +146,13 @@
     <div class="more-head"><span data-i18n="moreTitle">更多功能</span><button class="btn ghost icon" id="more-close" data-close>✕</button></div>
     <div class="more-grid">
       <button data-for="#btn-settings"><span class="mi">⚙</span><span data-i18n="settingsTitle">阅读设置</span></button>
-      <button data-action="phonetic"><span class="mi mi-aa">Aa</span><span data-i18n="phTitle">隐藏/显示音标与词性</span></button>
+      <button data-action="phonetic"><span class="mi mi-aa">Aa</span><span data-i18n="phMore">隐藏/显示
+音标与词性</span></button>
       <button data-action="paste"><span class="mi">📋</span><span data-i18n="pasteTitle">粘贴文本导入</span></button>
       <button data-action="import-backup"><span class="mi">📥</span><span data-i18n="btnImpBack">导入备份</span></button>
       <button data-action="export"><span class="mi">📤</span><span data-i18n="btnExport">导出备份</span></button>
-      <button data-action="lang"><span class="mi">🌐</span><span data-i18n="langSwitch">切换界面语言（中 / EN）</span></button>
+      <button data-action="lang"><span class="mi">🌐</span><span data-i18n="langMore">切换界面语言
+（中 / EN）</span></button>
       <button data-action="help"><span class="mi">❓</span><span data-i18n="helpTitle">帮助</span></button>
     </div>
     <div class="more-row"><label data-i18n="ttsRateTitle">朗读语速</label><select id="more-rate" class="mini"></select></div>
@@ -376,6 +378,8 @@ const I18N_LANGS = {
     settingsTitle: '阅读设置',
     helpTitle: '帮助',
     langSwitch: '切换界面语言（中 / EN）',
+    phMore: '隐藏/显示\n音标与词性',
+    langMore: '切换界面语言\n（中 / EN）',
     moreTitle: '更多功能',
     // 侧栏
     searchPh: '搜索书名 / 作者…',
@@ -579,6 +583,8 @@ const I18N_LANGS = {
     settingsTitle: 'Reader settings',
     helpTitle: 'Help',
     langSwitch: 'Switch UI language (English / 中文)',
+    phMore: 'Show/hide\nphonetic & POS',
+    langMore: 'Switch UI language\n(English / 中文)',
     moreTitle: 'More',
     searchPh: 'Search title / author…',
     dbInit: 'Database…',
