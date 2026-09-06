@@ -127,6 +127,7 @@ const I18N_LANGS = {
     ok: '确定',
     // 顶栏
     btnImport: '⬆ 导入小说',
+    btnImportBook: '⬆ 导入书籍',
     btnExport: '⇩ 导出备份',
     btnImpBack: '⇧ 导入备份',
     impTitle: '导入 .txt / .md 小说文件（可多选）',
@@ -327,6 +328,7 @@ const I18N_LANGS = {
     cancel: 'Cancel',
     ok: 'OK',
     btnImport: '⬆ Import',
+    btnImportBook: '⬆ Import books',
     btnExport: '⇩ Export backup',
     btnImpBack: '⇧ Import backup',
     impTitle: 'Import .txt / .md novel files (multi-select)',
@@ -15306,6 +15308,7 @@ class ChapterPager {
         lines: group.slice(),
         startChar: groupStartChar,
         endChar: groupStartChar + groupChars,
+        used,                              // 记录该页已占用的行高(px)，供孤行合并校验
       });
       group = [];
       groupChars = 0;
@@ -15341,14 +15344,24 @@ class ChapterPager {
     }
     flush();
 
-    // 最后一页过短时并入前一页（避免孤行）
+    // 最后一页过短时并入前一页（避免孤行）——但要校验前一页剩余高度：
+    // 上一页通常是排满的，若无条件把尾页行硬塞进去，实际渲染高度会超出预算，
+    // 底部 1~3 行被 overflow:hidden 裁掉（手机端逐词展示时尤其明显）。
+    // 仅当放得下时才合并，否则保留为独立尾页（内容完整优先于孤行美观）。
     if (pages.length > 1) {
       const last = pages[pages.length - 1];
       if (last.lines.length <= 2) {
         const prev = pages[pages.length - 2];
-        prev.lines.push(...last.lines);
-        prev.endChar = last.endChar;
-        pages.pop();
+        let extra = 0;
+        for (const ln of last.lines) {
+          extra += this.lineH + (ln.s === 0 ? this.paraGap : 0);
+        }
+        if (prev.used + extra <= this.budgetH) {
+          prev.lines.push(...last.lines);
+          prev.endChar = last.endChar;
+          prev.used += extra;
+          pages.pop();
+        }
       }
     }
 
@@ -15737,6 +15750,8 @@ class Reader {
     // 点击翻页热区：不用覆盖层（会挡住文本选取、显示手掌光标），
     // 改为正文上的 click 按横坐标判定（左 26% 上页 / 右 26% 下页）
     this.el.content.addEventListener('click', e => {
+      // 本次点击用于「关闭弹出的面板」（App 在 pointerdown 关闭时置位）：只关面板、不翻页
+      if (this._suppressPageTurn) { this._suppressPageTurn = false; return; }
       if (!this.hotZonesOn || this._hasSelection()) return;
       const r = this.el.content.getBoundingClientRect();
       const rel = (e.clientX - r.left) / Math.max(1, r.width);
@@ -16633,10 +16648,7 @@ class App {
       $('#more-overlay').classList.add('show');
     };
     $('#more-close').onclick = () => $('#more-overlay').classList.remove('show');
-    // 点击遮罩（弹窗面板以外）关闭
-    $('#more-overlay').addEventListener('pointerdown', e => {
-      if (e.target === $('#more-overlay')) $('#more-overlay').classList.remove('show');
-    });
+    // 遮罩点击关闭统一在下方 document 级 pointerdown 处理（与侧栏/词典面板同路径，并抑制点击翻页）
     // 阅读类按钮：转发到工具栏/阅读器对应控件
     $('#more-overlay').querySelectorAll('[data-for]').forEach(b => {
       b.onclick = (ev) => {
@@ -16666,17 +16678,36 @@ class App {
 
     // ---------- 点击面板以外任意位置自动关闭（侧栏 / 词典面板 / 更多浮层） ----------
     document.addEventListener('pointerdown', e => {
+      let closedAny = false;
       const sb = $('#sidebar');
       if (sb.classList.contains('open') && !sb.contains(e.target) && !e.target.closest('.tb-logo')) {
-        sb.classList.remove('open');
+        sb.classList.remove('open'); closedAny = true;
       }
       const dp = $('#dict-panel');
       if (dp.classList.contains('open') && !dp.contains(e.target) && !$('#sel-popup').contains(e.target)) {
-        dp.classList.remove('open');
+        dp.classList.remove('open'); closedAny = true;
       }
       const mo = $('#more-overlay');
-      if (mo.classList.contains('show') && !mo.contains(e.target)) mo.classList.remove('show');
+      // 点在弹窗面板以外的页面区域（含遮罩自身）→ 关闭，且不触发上一页/下一页
+      if (mo.classList.contains('show') && (e.target === mo || !mo.contains(e.target))) {
+        mo.classList.remove('show'); closedAny = true;
+      }
+      // 本次点击用于「关闭弹窗」：置抑制标记——随后同一击的 click 若落到正文阅读区，
+      // 只关弹窗、不翻页；700ms 后自动复位，避免触屏滑动残留吞掉后续真实翻页
+      if (closedAny && this.reader) {
+        this.reader._suppressPageTurn = true;
+        clearTimeout(this.__supTurnTimer);
+        this.__supTurnTimer = setTimeout(() => { this.reader._suppressPageTurn = false; }, 700);
+      }
     }, { passive: true });
+    // 兜底：关闭弹窗的那一击若 click 到达正文（浏览器合成 click 的目标差异），在捕获阶段拦下，绝不翻页
+    document.addEventListener('click', e => {
+      if (this.reader && this.reader._suppressPageTurn
+        && e.target && e.target.closest && e.target.closest('#page-content')) {
+        this.reader._suppressPageTurn = false;
+        e.stopPropagation();
+      }
+    }, true);
 
     // ---------- 设置等弹窗可拖动（拖标题栏）；「更多功能」面板同样可拖标题栏 ----------
     for (const m of document.querySelectorAll('.modal-backdrop > .modal')) this._makeDraggable(m);

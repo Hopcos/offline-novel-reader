@@ -110,6 +110,16 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
   box-shadow:8px 0 24px rgba(0,0,0,.18);
 }
 #sidebar.open{transform:none}
+/* 侧栏导入入口（搜索框上方）：一个导入图标 + 「导入书籍」文本，无多余图标 */
+.side-import{
+  display:flex; align-items:center; gap:8px; margin:10px 12px 0;
+  padding:9px 12px; border-radius:10px; border:1px dashed var(--accent);
+  background:var(--accent-soft); color:var(--accent);
+  font-size:13.5px; font-weight:600; cursor:pointer;
+  text-align:left; transition:background .15s;
+}
+.side-import:hover{background:color-mix(in srgb, var(--accent) 16%, transparent)}
+.side-import:active{transform:scale(.98)}
 .side-search{padding:10px 12px; border-bottom:1px solid var(--line)}
 .side-search input{
   width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--line);
