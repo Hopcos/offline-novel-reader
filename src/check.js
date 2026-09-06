@@ -16625,8 +16625,18 @@ class App {
     });
 
     // ---------- 「更多」浮层 ----------
-    $('#btn-more').onclick = (e) => { e.stopPropagation(); $('#more-overlay').classList.add('show'); };
+    $('#btn-more').onclick = (e) => {
+      e.stopPropagation();
+      // 每次打开复位为底部贴边（若上次被拖动过）
+      const sheet = $('#more-overlay .more-sheet');
+      if (sheet) { sheet.style.position = ''; sheet.style.left = ''; sheet.style.top = ''; sheet.style.margin = ''; }
+      $('#more-overlay').classList.add('show');
+    };
     $('#more-close').onclick = () => $('#more-overlay').classList.remove('show');
+    // 点击遮罩（弹窗面板以外）关闭
+    $('#more-overlay').addEventListener('pointerdown', e => {
+      if (e.target === $('#more-overlay')) $('#more-overlay').classList.remove('show');
+    });
     // 阅读类按钮：转发到工具栏/阅读器对应控件
     $('#more-overlay').querySelectorAll('[data-for]').forEach(b => {
       b.onclick = (ev) => {
@@ -16668,13 +16678,15 @@ class App {
       if (mo.classList.contains('show') && !mo.contains(e.target)) mo.classList.remove('show');
     }, { passive: true });
 
-    // ---------- 设置等弹窗可拖动（拖标题栏） ----------
+    // ---------- 设置等弹窗可拖动（拖标题栏）；「更多功能」面板同样可拖标题栏 ----------
     for (const m of document.querySelectorAll('.modal-backdrop > .modal')) this._makeDraggable(m);
+    this._makeDraggable($('#more-overlay .more-sheet'));
   }
 
-  /** 让弹窗可拖动：按住标题栏拖动 */
+  /** 让弹窗可拖动：按住标题栏拖动（modal-head / more-head 均可作拖动柄） */
   _makeDraggable(modal) {
-    const head = modal.querySelector('.modal-head');
+    if (!modal) return;
+    const head = modal.querySelector('.modal-head, .more-head');
     if (!head) return;
     let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
     head.addEventListener('pointerdown', e => {
