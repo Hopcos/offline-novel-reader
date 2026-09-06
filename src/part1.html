@@ -201,6 +201,12 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   -webkit-touch-callout:none; /* 移动端不弹系统选中菜单，改用自绘划词工具栏 */
 }
 #page-content .para{margin:0 0 .35em; text-indent:2em}
+/* 折衷保障：个别页面内容若仍超出可视区（浏览器真实断行与估算偏差），
+   允许在页内向下滚动看全最后一行；正常页不启用，外观与行为无变化 */
+#page-content.can-scroll{
+  overflow-y:auto; touch-action:pan-y; overscroll-behavior:contain;
+  scrollbar-width:thin;
+}
 #page-content.no-indent .para{text-indent:0}
 #page-content .para.tight{margin-bottom:0}
 #page-content .para.para-tts{background:rgba(255,205,60,.28); border-radius:4px}

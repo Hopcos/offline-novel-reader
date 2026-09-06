@@ -437,7 +437,12 @@ class App {
     this.settings.showPhonetic = !this.settings.showPhonetic;
     this.data.setSetting('showPhonetic', this.settings.showPhonetic).catch(() => {});
     this._syncPhoneticUI();
-    if (this._dictQuery) this._renderDict();
+    // 词典面板即时刷新（前缀过滤）
+    this._renderDict();
+    // 正文同样生效：重排重渲染当前章/页，过滤 "/音标/ 词性. " 前缀
+    if (this.reader) this.reader.applySettings(this.settings);
+    // 即时可见反馈，避免「点了没反应」的观感
+    toast(this.settings.showPhonetic ? I18N.t('phOn') : I18N.t('phOff'));
   }
 
   _syncPhoneticUI() {

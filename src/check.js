@@ -128,6 +128,8 @@ const I18N_LANGS = {
     // 顶栏
     btnImport: '⬆ 导入小说',
     btnImportBook: '⬆ 导入书籍',
+    phOn: '已显示音标与词性',
+    phOff: '已隐藏音标与词性',
     btnExport: '⇩ 导出备份',
     btnImpBack: '⇧ 导入备份',
     impTitle: '导入 .txt / .md 小说文件（可多选）',
@@ -329,6 +331,8 @@ const I18N_LANGS = {
     ok: 'OK',
     btnImport: '⬆ Import',
     btnImportBook: '⬆ Import books',
+    phOn: 'Phonetic & POS shown',
+    phOff: 'Phonetic & POS hidden',
     btnExport: '⇩ Export backup',
     btnImpBack: '⇧ Import backup',
     impTitle: 'Import .txt / .md novel files (multi-select)',
@@ -15289,9 +15293,10 @@ class ChapterPager {
     this.availH = Math.max(60, pageH - vPad * 2);
     // 段落底部间距（与 CSS .para margin-bottom:.35em 一致），分页时计入避免最后一行被裁切
     this.paraGap = Math.round(fontSize * 0.35);
-    // 底部预留两行留白：一行兜底分数行高/舍入误差，一行作为每页末尾的空白行，
-    // 杜绝最后 1~2 行被 overflow:hidden 吞掉或紧贴底边被遮挡
-    this.budgetH = Math.max(40, this.availH - this.lineH * 2);
+    // 纯静态预算（不做任何 DOM 实测）：底部预留「2 行 + 1 段间距」——
+    // 1 行兜底分数行高/浏览器断行与估算的偏差，1 行作为每页末尾的空白行，
+    // 额外 1 个段间距兜底页首/页尾段落的边距波动，确保最后一行永远放得下
+    this.budgetH = Math.max(40, this.availH - this.lineH * 2 - this.paraGap);
     this.maxLines = Math.max(1, Math.floor(this.availH / this.lineH));
   }
 
@@ -15328,9 +15333,12 @@ class ChapterPager {
         paraLines = [[0, text.length]];
       }
       for (const [s, e] of paraLines) {
-        // 新段落首行额外计入段落间距（跨页段落由 .para.tight 去间距，只会更宽松）
-        const gap = (group.length > 0 && s === 0) ? this.paraGap : 0;
-        const need = this.lineH + gap;
+        // 与 CSS 渲染对齐的间距模型：`.para` 的间距是「段末 margin-bottom:.35em」（见 #page-content .para），
+        // 只有当「段完整落在本页」时该段的末行才带这段边距；跨页段落（.para.tight）无间距。
+        // 旧模型把间距计在段首行，与实际渲染不符——逐词一本书（一行一段）时每行少算 ~.35em，必然底部溢出。
+        const fullPara = (s === 0) && (e >= text.length);
+        const endPad = fullPara ? this.paraGap : 0;
+        const need = this.lineH + endPad;
         if (group.length > 0 && used + need > this.budgetH) {
           flush();
           groupStartChar = charTotal;
@@ -15354,7 +15362,8 @@ class ChapterPager {
         const prev = pages[pages.length - 2];
         let extra = 0;
         for (const ln of last.lines) {
-          extra += this.lineH + (ln.s === 0 ? this.paraGap : 0);
+          const fullPara = (ln.s === 0) && (ln.e >= paras[ln.p].length);
+          extra += this.lineH + (fullPara ? this.paraGap : 0);
         }
         if (prev.used + extra <= this.budgetH) {
           prev.lines.push(...last.lines);
@@ -15567,7 +15576,12 @@ class Reader {
     let cur = null;
     for (let li = 0; li < page.lines.length; li++) {
       const ln = page.lines[li];
-      const text = chapter.paras[ln.p].slice(ln.s, ln.e);
+      // 隐藏音标/词性时：正文中形如 "/音标/ 词性. " 的前缀一并过滤（仅影响显示；
+      // 原文与划词定位(TTS、dataset)不变，词典联动取过滤后的干净词）
+      const raw = chapter.paras[ln.p].slice(ln.s, ln.e);
+      const text = (this.settings && this.settings.showPhonetic === false)
+        ? raw.replace(/\/[^/]*\/\s*[a-z]{1,6}\.\s+/gi, '')
+        : raw;
       if (!cur || cur.p !== ln.p) {
         cur = { p: ln.p };
         const el = document.createElement('p');
@@ -15584,6 +15598,12 @@ class Reader {
     root.appendChild(frag);
     // 中间过渡段落（跨页段落在上/下页有接续）给出更紧凑间距
     this._tightenBoundaryParas(page);
+    // 折衷保障（零移行、零重排）：仅一次轻量测量——若本页真实渲染高度超出可视区
+    // （浏览器断行/行高与估算的残余偏差），允许页内向下滚动看全最后一行；
+    // 正常页不加 can-scroll，外观与交互完全不变
+    const c = this.el.content;
+    c.scrollTop = 0;
+    c.classList.toggle('can-scroll', c.scrollHeight > c.clientHeight + 1);
   }
 
   /** 跨页段落首行/末行排版微调（可读性） */
@@ -15768,6 +15788,9 @@ class Reader {
       const t = e.changedTouches[0];
       const dx = t.clientX - tx, dy = t.clientY - ty;
       if (Math.abs(dx) > 56 && Math.abs(dx) > Math.abs(dy) * 1.4 && !this._hasSelection()) {
+        // 本页内容超出可视区（可页内滚动看全）且尚未滚到底时：横向滑动留给查看剩余内容，不翻页
+        const c = this.el.content;
+        if (c.classList.contains('can-scroll') && c.scrollHeight - c.scrollTop - c.clientHeight > 8) return;
         dx < 0 ? this.nextPage() : this.prevPage();
       }
     }, { passive: true });
@@ -16301,7 +16324,12 @@ class App {
     this.settings.showPhonetic = !this.settings.showPhonetic;
     this.data.setSetting('showPhonetic', this.settings.showPhonetic).catch(() => {});
     this._syncPhoneticUI();
-    if (this._dictQuery) this._renderDict();
+    // 词典面板即时刷新（前缀过滤）
+    this._renderDict();
+    // 正文同样生效：重排重渲染当前章/页，过滤 "/音标/ 词性. " 前缀
+    if (this.reader) this.reader.applySettings(this.settings);
+    // 即时可见反馈，避免「点了没反应」的观感
+    toast(this.settings.showPhonetic ? I18N.t('phOn') : I18N.t('phOff'));
   }
 
   _syncPhoneticUI() {
