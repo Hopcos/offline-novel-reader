@@ -264,15 +264,20 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   cursor:grab; user-select:none; -webkit-user-select:none}
 .more-head:active{cursor:grabbing}
 .more-head span{flex:1}
-/* 自适应布局：列宽随容器变化，放不下的按钮自动换到下一行，内容完整展示 */
-.more-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(104px, 1fr)); gap:8px}
+/* 更多面板：每行两个功能项，左图标 + 右文本，视觉更丰富 */
+.more-grid{display:grid; grid-template-columns:repeat(2, 1fr); gap:10px}
 .more-grid button{
-  padding:12px 6px; border-radius:10px; background:var(--btn-bg); color:var(--btn-fg);
-  font-size:13px; border:1px solid transparent;
-  white-space:normal; overflow-wrap:anywhere; line-height:1.3;  /* 内容显示全：长文本自动换行 */
+  display:flex; align-items:center; gap:10px; text-align:left;
+  padding:12px 12px; border-radius:10px; background:var(--btn-bg); color:var(--btn-fg);
+  font-size:13.5px; border:1px solid transparent;
+  white-space:normal; overflow-wrap:anywhere; line-height:1.35;  /* 内容显示全：长文本自动换行 */
 }
+.more-grid .mi{flex:none; width:24px; text-align:center; font-size:17px}
+.more-grid .mi-aa{font-size:12.5px; font-weight:700; letter-spacing:.5px; color:var(--accent)}
 .more-grid button:active{transform:scale(.96)}
+/* 朗读语速 / 发音人两行的下拉框左右完全对齐：标签定宽，下拉占满其余宽度 */
 .more-row{display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--muted)}
+.more-row label{flex:none; width:64px; white-space:nowrap}
 .more-row select{flex:1; min-width:0}
 
 /* 阅读区点击翻页：不再用覆盖热区（覆盖层会挡住文本选取、显示手掌光标），

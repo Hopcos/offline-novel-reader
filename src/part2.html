@@ -145,13 +145,13 @@
   <div class="more-sheet">
     <div class="more-head"><span data-i18n="moreTitle">更多功能</span><button class="btn ghost icon" id="more-close" data-close>✕</button></div>
     <div class="more-grid">
-      <button data-for="#btn-settings" data-i18n="settingsTitle">设置</button>
-      <button data-action="phonetic" data-i18n="phTitle">音标</button>
-      <button data-action="paste" data-i18n="pasteTitle">粘贴导入</button>
-      <button data-action="import-backup" data-i18n="btnImpBack">导入备份</button>
-      <button data-action="export" data-i18n="btnExport">导出备份</button>
-      <button data-action="lang" data-i18n="langSwitch">语言</button>
-      <button data-action="help" data-i18n="helpTitle">帮助</button>
+      <button data-for="#btn-settings"><span class="mi">⚙</span><span data-i18n="settingsTitle">阅读设置</span></button>
+      <button data-action="phonetic"><span class="mi mi-aa">Aa</span><span data-i18n="phTitle">隐藏/显示音标与词性</span></button>
+      <button data-action="paste"><span class="mi">📋</span><span data-i18n="pasteTitle">粘贴文本导入</span></button>
+      <button data-action="import-backup"><span class="mi">📥</span><span data-i18n="btnImpBack">导入备份</span></button>
+      <button data-action="export"><span class="mi">📤</span><span data-i18n="btnExport">导出备份</span></button>
+      <button data-action="lang"><span class="mi">🌐</span><span data-i18n="langSwitch">切换界面语言（中 / EN）</span></button>
+      <button data-action="help"><span class="mi">❓</span><span data-i18n="helpTitle">帮助</span></button>
     </div>
     <div class="more-row"><label data-i18n="ttsRateTitle">朗读语速</label><select id="more-rate" class="mini"></select></div>
     <div class="more-row"><label data-i18n="ttsVoiceTitle">发音人</label><select id="more-voice" class="mini"></select></div>
@@ -367,8 +367,8 @@ const I18N_LANGS = {
     btnImportBook: '⬆ 导入书籍',
     phOn: '已显示音标与词性',
     phOff: '已隐藏音标与词性',
-    btnExport: '⇩ 导出备份',
-    btnImpBack: '⇧ 导入备份',
+    btnExport: '导出备份',
+    btnImpBack: '导入备份',
     impTitle: '导入 .txt / .md 小说文件（可多选）',
     pasteTitle: '粘贴文本导入',
     exportTitle: '导出全部书籍与阅读进度为备份文件',
@@ -570,8 +570,8 @@ const I18N_LANGS = {
     btnImportBook: '⬆ Import books',
     phOn: 'Phonetic & POS shown',
     phOff: 'Phonetic & POS hidden',
-    btnExport: '⇩ Export backup',
-    btnImpBack: '⇧ Import backup',
+    btnExport: 'Export backup',
+    btnImpBack: 'Import backup',
     impTitle: 'Import .txt / .md novel files (multi-select)',
     pasteTitle: 'Paste text to import',
     exportTitle: 'Export all books & reading progress as a backup file',
