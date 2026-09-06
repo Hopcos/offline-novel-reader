@@ -246,6 +246,9 @@ class Reader {
     this.reading = false;
     this.readingMode = 'page';     // page: 页级连续朗读
     this.hotZonesOn = true;
+    this._resume = null;           // 朗读断点 {chapterIndex,pageIndex,chars}：主动停止时记录，同页再点朗读续播
+    this._ttsSentStart = 0;        // 当前句在本页内的字符偏移（每句开读前更新）
+    this._ttsNav = false;          // 朗读内部跨章标记：豁免 gotoChapter 的断点清除
 
     this.el = {
       root: $('#reader'),
@@ -269,6 +272,7 @@ class Reader {
   /* ---------- 打开 / 关闭 ---------- */
   async openBook(book) {
     this.stopReading();
+    this._resume = null;   // 换书：朗读断点失效（断点绑定章节索引）
     this.book = book;
     this.chapters = await this.data.loadChapters(book.id);
     this._pagesCache.clear();
@@ -355,6 +359,8 @@ class Reader {
   async gotoChapter(index, pageIndex = 0, charOffsetInChapter = -1) {
     if (!this.chapters || !this.chapters.length) return;
     index = clampNum(index, 0, this.chapters.length - 1);
+    // 用户翻章/跳转：朗读断点作废（朗读内部跨章经 _ttsNav 标记豁免）
+    if (!this._ttsNav && this._resume) this._resume = null;
     this.chapterIndex = index;
     // 顶部标题只显示章节名（书名由侧栏与状态栏展示）
     this.el.title.textContent = this.chapters[index].title || '';
@@ -380,6 +386,7 @@ class Reader {
 
   async nextPage() {
     if (!this.book) return;
+    this._resume = null;   // 用户翻页：朗读断点作废
     const { pages } = await this._ensurePages(this.chapterIndex);
     if (this.pageIndex < pages.length - 1) { this.pageIndex++; this._render(); this._afterNav(); }
     else if (this.chapterIndex < this.chapters.length - 1) { await this.gotoChapter(this.chapterIndex + 1, 0); }
@@ -387,6 +394,7 @@ class Reader {
   }
   async prevPage() {
     if (!this.book) return;
+    this._resume = null;   // 用户翻页：朗读断点作废（回到"从当前页头开始朗读"）
     if (this.pageIndex > 0) { this.pageIndex--; this._render(); this._afterNav(); }
     else if (this.chapterIndex > 0) {
       const { pages } = await this._ensurePages(this.chapterIndex - 1);
@@ -550,7 +558,13 @@ class Reader {
     this._syncTtsUI();
     this._readCurrentPage();
   }
-  stopReading() {
+  stopReading(manual) {
+    // 朗读中由用户主动停止：记录「朗读断点」（章/页 + 本页已读到第几句的字符偏移）。
+    // 之后若停留在同一页，再点朗读即从停止处继续；若翻走了，翻页路径会清除断点、从页首重读。
+    // （无参调用 = 自然结束/切换书/程序性停止，不记录；(_ttsNav 跨章过程)中的点击不记录，避免章/页错位）
+    if (manual && this.reading && !this._ttsNav) {
+      this._resume = { chapterIndex: this.chapterIndex, pageIndex: this.pageIndex, chars: this._ttsSentStart || 0 };
+    }
     this.reading = false;
     this.tts.stop();
     this.el.content.querySelectorAll('.para-tts').forEach(el => el.classList.remove('para-tts'));
@@ -579,13 +593,30 @@ class Reader {
       if (last && last.p === ln.p) last.text += text;
       else groups.push({ p: ln.p, text });
     }
+    // 断点恢复：仅当「记录的章/页 == 当前章/页」时继续；否则（用户已翻走）断点作废、从当前页头开始
+    let skip = 0;
+    if (this._resume) {
+      if (this._resume.chapterIndex === this.chapterIndex && this._resume.pageIndex === this.pageIndex && this._resume.chars > 0) {
+        skip = this._resume.chars;
+        toast(I18N.t('ttsResume'));
+      }
+      this._resume = null;
+    }
+    let spoken = 0;
     for (const g of groups) {
       if (!this.reading) return;
+      if (spoken + g.text.length <= skip) { spoken += g.text.length; continue; }  // 整段已读过
       const sentences = splitSentences(g.text);
+      let base = spoken;
       for (const s of sentences) {
-        if (!this.reading) return;
-        await this._speakAndWait(s, g.p);
+        if (base >= skip) {
+          if (!this.reading) return;
+          this._ttsSentStart = base;   // 每句开读前记录页内偏移——主动停止时即断点位置
+          await this._speakAndWait(s, g.p);
+        }
+        base += s.length;
       }
+      spoken = base;
     }
     if (!this.reading) return;
     if (this.pageIndex < pages.length - 1) {
@@ -594,7 +625,9 @@ class Reader {
       this._afterNav();
       await this._readCurrentPage();
     } else if (this.chapterIndex < this.chapters.length - 1) {
+      this._ttsNav = true;   // 标记朗读内部跨章，gotoChapter 不清朗读断点
       await this.gotoChapter(this.chapterIndex + 1, 0);
+      this._ttsNav = false;
       await this._readCurrentPage();
     } else {
       toast(I18N.t('bookFinished'));
@@ -622,8 +655,8 @@ class Reader {
     this.el.chapPrev.onclick = () => this.prevChapter();
     this.el.chapNext.onclick = () => this.nextChapter();
     this.el.toc.onclick = () => this.bus.emit('reader:toc-open');
-    // 播放按钮即开关：未在朗读 → 开始；朗读中 → 停止（按钮图标 ⏹ 提示当前状态）
-    this.el.ttsPlay.onclick = () => { this.reading ? this.stopReading() : this.startReading(); };
+    // 播放按钮即开关：未在朗读 → 开始（有停止断点且未翻页时自动续播）；朗读中 → 停止（记录断点）
+    this.el.ttsPlay.onclick = () => { this.reading ? this.stopReading(true) : this.startReading(); };
     // 全局键盘翻页（输入框/弹窗打开时不劫持按键）
     window.addEventListener('keydown', e => this._onKey(e));
 
