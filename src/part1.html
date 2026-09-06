@@ -70,13 +70,10 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
 #topbar{grid-area:topbar; display:flex; align-items:center; gap:8px; padding:0 14px;
   background:var(--bg2); border-bottom:1px solid var(--line); z-index:50;
   box-shadow:0 2px 8px rgba(0,0,0,.06)}
-/* 顶栏品牌图标：∞ 无限符号（无限流）· 霓虹渐变 + 辉光呼吸（未来风） */
+/* 顶栏品牌图标：打开的书（小说）· 霓虹渐变描边 + 辉光呼吸（未来风） */
 .tb-logo{
-  font-size:26px; line-height:1; font-weight:700; padding-right:2px;
-  font-family:"Segoe UI Symbol","Arial Nova","Arial",sans-serif;
-  background:linear-gradient(135deg,#00e5ff 0%,#7c4dff 55%,#ff4dd2 100%);
-  -webkit-background-clip:text; background-clip:text; color:transparent;
-  filter:drop-shadow(0 0 5px rgba(0,229,255,.5)) drop-shadow(0 0 12px rgba(124,77,255,.32));
+  width:24px; height:24px; flex:none; display:block; padding-right:2px;
+  filter:drop-shadow(0 0 4px rgba(0,229,255,.5)) drop-shadow(0 0 10px rgba(124,77,255,.32));
   user-select:none; -webkit-user-select:none; pointer-events:none;
   animation:logoGlow 3.4s ease-in-out infinite;
 }
@@ -167,11 +164,16 @@ input,select,textarea{font-family:inherit; font-size:14px; color:inherit}
   display:flex; align-items:center; gap:6px; padding:8px 16px; flex-wrap:wrap;
   border-bottom:1px solid var(--line); background:var(--bg2);
 }
-.rt-title{font-weight:600; font-size:14px; flex:1; min-width:120px;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:center}
+.rt-title{
+  flex:1; min-width:80px; text-align:left;
+  font-weight:600; font-size:14px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
 .rt-gap{width:2px; height:18px; background:var(--line); border-radius:1px; margin:0 4px}
 .rt-page-label{font-size:12.5px; color:var(--muted); min-width:86px; text-align:center; font-variant-numeric:tabular-nums}
 .rt-percent{font-size:12px; color:var(--accent); font-variant-numeric:tabular-nums; min-width:52px; text-align:right}
+.rt-ph{font-size:13px; font-weight:700; letter-spacing:.5px}
+.rt-ph.off{opacity:.38; text-decoration:line-through}
 select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--line); background:var(--bg); outline:none; font-size:12.5px}
 
 #page-frame{
@@ -352,7 +354,7 @@ select.mini{padding:5px 22px 5px 8px; border-radius:7px; border:1px solid var(--
   /* 阅读工具栏：核心图标常显（目录 / 上一章 / 下一章 / 播放），次要项收纳进「⋯」浮层 */
   #btn-more{display:inline-flex}
   .rtoolbar{gap:4px; padding:6px 8px}
-  .rt-title{min-width:56px; font-size:13px}
+  .rt-title{min-width:40px; font-size:13px}
   .rt-gap, #tts-rate, #tts-voice,
   .rt-page-label, #btn-page-prev, #btn-page-next, .rt-percent{display:none}
   /* 顶栏：导入按钮压缩为图标，隐藏文字按钮 */

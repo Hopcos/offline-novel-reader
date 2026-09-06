@@ -146,8 +146,9 @@ class ChapterPager {
     this.availH = Math.max(60, pageH - vPad * 2);
     // 段落底部间距（与 CSS .para margin-bottom:.35em 一致），分页时计入避免最后一行被裁切
     this.paraGap = Math.round(fontSize * 0.35);
-    // 底部再保留一行留白：杜绝分数行高 / 舍入误差导致的最后 1~2 行被 overflow:hidden 吞掉
-    this.budgetH = Math.max(40, this.availH - this.lineH);
+    // 底部预留两行留白：一行兜底分数行高/舍入误差，一行作为每页末尾的空白行，
+    // 杜绝最后 1~2 行被 overflow:hidden 吞掉或紧贴底边被遮挡
+    this.budgetH = Math.max(40, this.availH - this.lineH * 2);
     this.maxLines = Math.max(1, Math.floor(this.availH / this.lineH));
   }
 
@@ -339,7 +340,8 @@ class Reader {
     if (!this.chapters || !this.chapters.length) return;
     index = clampNum(index, 0, this.chapters.length - 1);
     this.chapterIndex = index;
-    this.el.title.textContent = this.book.title + ' · ' + (this.chapters[index].title || '');
+    // 顶部标题只显示章节名（书名由侧栏与状态栏展示）
+    this.el.title.textContent = this.chapters[index].title || '';
     const { pages } = await this._ensurePages(index);
     let target = 0;
     if (pageIndex >= 0 && pageIndex < pages.length) {

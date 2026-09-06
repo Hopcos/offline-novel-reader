@@ -30,6 +30,26 @@ function sanitizeGloss(s, maxLen) {
   return g;
 }
 
+/** en2cn 词条：带音标+词性前缀（如 /ə'bʌv/prep. 在…上面；高于；），开关可一键过滤 */
+function buildEn2cnGloss(r, maxLen) {
+  const t = String(r.translation || '').replace(/\\n/g, ';');
+  const posM = /^\s*([a-zA-Z]{1,6})\.\s*/.exec(t);
+  if (r.phonetic && posM) {
+    const firstPos = posM[1];
+    // 去掉每个义项开头的词性（n./vt./adv.…），只保留第一个词性作前缀
+    const body = t
+      .split(';')
+      .map(s => s.replace(/^\s*[a-zA-Z]{1,6}\.\s*/i, '').trim())
+      .filter(Boolean)
+      .join(';');
+    const cleanBody = sanitizeGloss(body, maxLen);
+    if (!cleanBody) return sanitizeGloss(t, maxLen);
+    const g = `/${r.phonetic}/${firstPos}. ${cleanBody}`;
+    return g.length > maxLen ? g.slice(0, maxLen) + '…' : g;
+  }
+  return sanitizeGloss(t, maxLen);
+}
+
 /* ---------- 1. en2cn from ECDICT CSV ---------- */
 const ECDICT_TOP_CHARS = []; // 全量中文释义中的高频汉字（常用字白名单，供 cn2en 选词用）
 const CJK = /[\u4e00-\u9fff]/;
@@ -63,6 +83,7 @@ async function genEn2cn() {
     const f = parseCsvLine(line);
     if (first) { first = false; continue; } // header
     const word = (f[0] || '').trim();
+    const phonetic = (f[1] || '').trim();
     const translation = (f[3] || '').trim();
     if (!word || !translation) continue;
     if (!/^[a-zA-Z][a-zA-Z' -]*$/.test(word)) continue; // 纯英文词/短语
@@ -78,7 +99,7 @@ async function genEn2cn() {
     const oxford = (f[6] || '').trim() === '1' ? 1 : 0;
     const bnc = parseInt(f[8] || '0', 10) || 0;
     const frq = parseInt(f[9] || '0', 10) || 0;
-    rows.push({ word, translation, collins, oxford, bnc: bnc || 999999, frq: frq || 999999 });
+    rows.push({ word, phonetic, translation, collins, oxford, bnc: bnc || 999999, frq: frq || 999999 });
   }
   console.log('ECDICT candidate rows:', rows.length);
   // 高频汉字 top 1500 作为「常用字」白名单
@@ -95,7 +116,7 @@ async function genEn2cn() {
     if (out.length >= TOP) break;
     if (seen.has(r.word)) continue;
     seen.add(r.word);
-    const g = sanitizeGloss(r.translation, 110);
+    const g = buildEn2cnGloss(r, 140);
     if (!g) continue;
     out.push(r.word + '|' + g);
   }

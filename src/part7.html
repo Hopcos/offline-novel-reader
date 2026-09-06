@@ -88,6 +88,7 @@ class App {
       hitZone: true,
       indent: true,
       selAction: 'popup',
+      showPhonetic: true,   // 英译中词条是否显示「音标+词性」前缀（Aa 开关）
       ttsRate: 1,
       ttsVoice: '',
     };
@@ -130,6 +131,7 @@ class App {
     this._wireBus();
     this._buildDictPanel();
     this._bindUI();
+    this._syncPhoneticUI();
     await this.refreshBooks();
 
     // ---- 状态栏 ----
@@ -414,6 +416,24 @@ class App {
     this._renderDict();
   }
 
+  /** 音标+词性过滤：隐藏时去掉 en2cn 词条开头的 /音标/词性. 前缀 */
+  _fmtGloss(gloss) {
+    if (this.settings.showPhonetic) return gloss;
+    return String(gloss || '').replace(/^\/[^/]*\/\s*[a-z]{1,6}\.\s*/i, '');
+  }
+
+  _togglePhonetic() {
+    this.settings.showPhonetic = !this.settings.showPhonetic;
+    this.data.setSetting('showPhonetic', this.settings.showPhonetic).catch(() => {});
+    this._syncPhoneticUI();
+    if (this._dictQuery) this._renderDict();
+  }
+
+  _syncPhoneticUI() {
+    const b = $('#btn-phonetic');
+    if (b) b.classList.toggle('off', !this.settings.showPhonetic);
+  }
+
   /** 按当前标签渲染词典结果 */
   _renderDict() {
     const q = (this._dictQuery || '').trim();
@@ -440,7 +460,7 @@ class App {
         } else {
           html += `<div class="dict-title">${I18N.t('dictEnTitle', { hit: trans.segments.filter(s => s.gloss).length, total: trans.segments.length })}</div>`;
           html += trans.segments.filter(s => s.gloss).map(s =>
-            `<div class="dict-entry"><span class="w">${escapeHtml(s.txt)}</span><span class="d">${escapeHtml(s.gloss)}</span><span class="dict-tag">en2cn</span></div>`).join('');
+            `<div class="dict-entry"><span class="w">${escapeHtml(s.txt)}</span><span class="d">${escapeHtml(this._fmtGloss(s.gloss))}</span><span class="dict-tag">en2cn</span></div>`).join('');
           if (trans.unknown.length) html += `<div class="dict-title">${I18N.t('dictUnknown')}</div><p class="muted-text">${escapeHtml(trans.unknown.slice(0, 20).join(' / '))}</p>`;
         }
       } else if (dictId === 'cn2en') {
@@ -673,6 +693,8 @@ class App {
   /* ---------- UI 事件绑定 ---------- */
   _bindUI() {
     $('#toggle-sidebar').onclick = () => $('#sidebar').classList.toggle('open');
+    // 音标+词性显示开关（Aa）：隐藏时过滤 en2cn 词条中的 /音标/词性. 前缀
+    $('#btn-phonetic').onclick = () => this._togglePhonetic();
     $('#btn-import').onclick = () => $('#file-input').click();
     // 粘贴导入弹窗：统一绑定打开 + 关闭（取消 / 右上角 ✕）
     bindModal($('#dlg-paste'), $('#btn-paste'));
